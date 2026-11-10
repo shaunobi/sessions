@@ -57,6 +57,16 @@ The two rankings are merged by reciprocal rank fusion. Short queries (one or two
 - Messages are split into pieces of up to 254 tokens (at most eight per message). Each piece's vector is stored once in the database, keyed by a hash of its tokens, as 384 signed bytes; re-reading a live session only embeds the new pieces. Vectors are searched in memory by brute force, which takes a few milliseconds at this size, so the SQLite vector add-on was not needed.
 - On this PC (RTX 3070) the first pass over all ~20,500 messages takes about 80 seconds after keyword indexing, and the status shows "Learning meaning" with progress. A search, including embedding the query, takes 15–200 ms. The database grows from about 20 MB to about 33 MB.
 
+## Tray and quick search
+
+Sessions lives in the notification area (lower right of the taskbar) while it runs.
+
+- **Click the icon** for quick search: a frosted full-screen overlay with one search box at the top. It lists the most recent conversations straight away and narrows them as you type (words and meaning, as in the main window). Use **↑ ↓** (or Page Up/Down) to choose and **Enter** to open the conversation in its own app; the overlay disappears. **Esc**, clicking outside the panel or switching to another window closes it. There is deliberately no keyboard shortcut.
+- **Right-click the icon** to open the full app.
+- **Minimizing** the full app hides it to the tray instead of the taskbar. **Closing** it quits Sessions, tray icon included.
+- The icon's tooltip shows the same status as the window: indexing progress, or "Up to date · N sessions · N messages".
+- `Sessions.exe --tray` starts with only the tray icon, which suits starting at sign-in. `--quick` starts straight into quick search.
+
 ## Cards
 
 Each card shows the tool's own logo, the session's name as its app shows it, its folder, when it was last active and how many messages it has. Command-line sessions carry a small `>_` terminal chip on the logo; Claude Code's command line has its own dark logo as well. The account appears in the logo's tooltip and in the Account filter.

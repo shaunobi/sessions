@@ -29,6 +29,18 @@ std::wstring Plural(int n, wchar_t const* one, wchar_t const* many) {
     return std::to_wstring(n) + L" " + (n == 1 ? one : many);
 }
 
+std::wstring Grouped(int64_t n) {
+    auto text = std::to_wstring(n);
+    for (int i = int(text.size()) - 3; i > 0; i -= 3) text.insert(size_t(i), L",");
+    return text;
+}
+
+// "Up to date · 410 sessions · 20,520 messages"
+std::wstring UpToDate(Index::Totals const& totals) {
+    return L"Up to date \u00B7 " + Grouped(totals.sessions) + (totals.sessions == 1 ? L" session" : L" sessions") + L" \u00B7 " +
+           Grouped(totals.messages) + (totals.messages == 1 ? L" message" : L" messages");
+}
+
 IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback const& callback, HANDLE stop) {
     IndexStatus status;
     status.state = IndexStatus::State::Scanning;
@@ -175,7 +187,7 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
     status.dataChanged = true;  // titles or accounts may have changed even with no new files
     (void)changed;
     status.done = status.total;
-    status.message = L"Up to date · " + Plural(totals.sessions, L"session", L"sessions");
+    status.message = UpToDate(totals);
     callback(status);
     return status;
 }
@@ -282,7 +294,7 @@ void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, 
     }
     auto totals = index.Count();
     status.state = IndexStatus::State::Ready;
-    status.message = L"Up to date \u00B7 " + Plural(totals.sessions, L"session", L"sessions");
+    status.message = UpToDate(totals);
     callback(status);
 }
 

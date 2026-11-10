@@ -40,6 +40,7 @@
 #include "Launch.h"
 #include "Search.h"
 #include "Text.h"
+#include "TrayIcon.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
@@ -332,6 +333,21 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     std::unordered_map<int64_t, CardCache> cardCache;
     std::vector<int64_t> shown;
     bool closing = false, populatingFilters = false, sortChosen = false;
+    bool startInTray = false, startQuick = false;
+    int64_t quickShownAt = 0;
+
+    // Tray icon and the full-screen quick search it opens.
+    sessions::TrayIcon tray;
+    Window quick{nullptr};
+    FrameworkElement quickRoot{nullptr};
+    TextBox quickBox{nullptr};
+    ListView quickList{nullptr};
+    TextBlock quickHint{nullptr};
+    Collections::IObservableVector<IInspectable> quickItems{nullptr};
+    std::unique_ptr<Searcher> quickSearcher;
+    Microsoft::UI::Dispatching::DispatcherQueueTimer quickDelay{nullptr};
+    uint64_t quickTicket = 0;
+    bool quickOpening = false;
     int lastTotal = 0;
 
     App() {
@@ -453,11 +469,24 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         window.Closed([this](auto&&, auto&&) {
             closing = true;
             searchDelay.Stop();
+            if (quickDelay) quickDelay.Stop();
             if (indexer) indexer->Stop();
             indexer.reset();
             searcher.reset();
+            quickSearcher.reset();
+            tray.Remove();
+            if (quick) quick.Close();
             appIcon.Reset();
+            Application::Current().Exit();
         });
+        // Minimizing puts Sessions in the notification area instead of the taskbar.
+        window.AppWindow().Changed([this](AppWindow const& sender, AppWindowChangedEventArgs const& args) {
+            if (!args.DidPresenterChange() && !args.DidSizeChange()) return;
+            if (auto presenter = sender.Presenter().try_as<OverlappedPresenter>();
+                presenter && presenter.State() == OverlappedPresenterState::Minimized)
+                sender.Hide();
+        });
+        tray.Create([this] { ShowQuick(); }, [this] { ShowMain(); });
         shell.Loaded([this](auto&&, auto&&) {
             auto check = [this] {
                 double before = logoScale;
@@ -471,8 +500,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             check();
             shell.XamlRoot().Changed([check](auto&&, auto&&) { check(); });
         });
-        window.Activate();
-        search.Focus(FocusState::Programmatic);
+        if (!startInTray) {
+            window.Activate();
+            search.Focus(FocusState::Programmatic);
+        }
+        if (startQuick) ShowQuick();
         indexer->Start();
     }
 
@@ -907,6 +939,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             std::string active;
             try { active = index->MetaValue("claude_desktop_account"); } catch (...) {}
             if (!active.empty() && active != row->account) {
+                ShowMain();
                 ConfirmOtherOrganization(id, AccountName(row->account), AccountName(active));
                 return;
             }
@@ -1003,6 +1036,253 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
     }
 
+    // ---- Tray and quick search ------------------------------------------
+
+    void ShowMain() {
+        if (closing) return;
+        HideQuick();
+        auto appWindow = window.AppWindow();
+        appWindow.Show();
+        if (auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>();
+            presenter && presenter.State() == OverlappedPresenterState::Minimized)
+            presenter.Restore();
+        window.Activate();
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        if (handle) SetForegroundWindow(handle);
+    }
+
+    static constexpr wchar_t QuickMarkup[] = LR"(
+<Grid xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' x:Name='Backdrop' Background='#01000000'>
+  <Grid.RowDefinitions><RowDefinition Height='0.16*'/><RowDefinition Height='Auto'/><RowDefinition Height='*'/></Grid.RowDefinitions>
+  <Border Grid.Row='1' x:Name='Panel' Width='780' HorizontalAlignment='Center' CornerRadius='12' Padding='14'
+          Background='{ThemeResource SolidBackgroundFillColorBaseBrush}' BorderBrush='{ThemeResource SurfaceStrokeColorDefaultBrush}' BorderThickness='1'>
+    <StackPanel Spacing='10'>
+      <TextBox x:Name='QuickBox' FontSize='22' PlaceholderText='Find a conversation' AutomationProperties.Name='Find a conversation'/>
+      <ListView x:Name='QuickList' SelectionMode='Single' IsItemClickEnabled='True' MaxHeight='620'>
+        <ListView.ItemContainerStyle>
+          <Style TargetType='ListViewItem'>
+            <Setter Property='HorizontalContentAlignment' Value='Stretch'/>
+            <Setter Property='Padding' Value='10,6,10,6'/>
+            <Setter Property='MinHeight' Value='0'/>
+          </Style>
+        </ListView.ItemContainerStyle>
+      </ListView>
+      <TextBlock x:Name='QuickHint' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'
+                 Text='&#x2191; &#x2193; to choose  &#xB7;  Enter to open  &#xB7;  Esc to close'/>
+    </StackPanel>
+  </Border>
+</Grid>)";
+
+    void CreateQuick() {
+        quick = Window();
+        quick.Title(L"Sessions search");
+        quick.SystemBackdrop(DesktopAcrylicBackdrop());
+        quickRoot = Xaml(QuickMarkup);
+        quick.Content(quickRoot);
+        quickBox = Named<TextBox>(quickRoot, L"QuickBox");
+        quickList = Named<ListView>(quickRoot, L"QuickList");
+        quickHint = Named<TextBlock>(quickRoot, L"QuickHint");
+        quickItems = single_threaded_observable_vector<IInspectable>();
+        quickList.ItemsSource(quickItems);
+
+        // Clicking anywhere outside the panel closes it.
+        quickRoot.PointerPressed([this](auto&&, Input::PointerRoutedEventArgs const& e) {
+            if (e.OriginalSource() == quickRoot) HideQuick();
+        });
+        quickList.ItemClick([this](auto&&, ItemClickEventArgs const& e) {
+            if (auto row = e.ClickedItem().try_as<FrameworkElement>()) OpenFromQuick(unbox_value<int64_t>(row.Tag()));
+        });
+        quickBox.PreviewKeyDown([this](auto&&, Input::KeyRoutedEventArgs const& e) {
+            using winrt::Windows::System::VirtualKey;
+            const int count = int(quickItems.Size());
+            int selected = quickList.SelectedIndex();
+            switch (e.Key()) {
+            case VirtualKey::Down:
+                if (count) quickList.SelectedIndex(std::min(count - 1, selected + 1));
+                break;
+            case VirtualKey::Up:
+                if (count) quickList.SelectedIndex(std::max(0, selected - 1));
+                break;
+            case VirtualKey::PageDown:
+                if (count) quickList.SelectedIndex(std::min(count - 1, selected + 8));
+                break;
+            case VirtualKey::PageUp:
+                if (count) quickList.SelectedIndex(std::max(0, selected - 8));
+                break;
+            case VirtualKey::Enter:
+                if (count) {
+                    auto item = quickItems.GetAt(uint32_t(std::max(0, selected))).as<FrameworkElement>();
+                    OpenFromQuick(unbox_value<int64_t>(item.Tag()));
+                }
+                break;
+            case VirtualKey::Escape:
+                HideQuick();
+                break;
+            default:
+                return;
+            }
+            if (quickList.SelectedItem()) quickList.ScrollIntoView(quickList.SelectedItem());
+            e.Handled(true);
+        });
+        quickDelay = quick.DispatcherQueue().CreateTimer();
+        quickDelay.Interval(std::chrono::milliseconds(120));
+        quickDelay.IsRepeating(false);
+        quickDelay.Tick([this](auto&&, auto&&) { QuickSearch(); });
+        quickBox.TextChanged([this](auto&&, auto&&) {
+            quickDelay.Stop();
+            quickDelay.Start();
+        });
+        // Leaving the overlay (clicking another window) closes it.
+        quick.Activated([this](auto&&, WindowActivatedEventArgs const& e) {
+            // (Ignored right after opening, while Windows settles which window is in front.)
+            if (e.WindowActivationState() == WindowActivationState::Deactivated && !quickOpening &&
+                sessions::NowMs() - quickShownAt > 800)
+                HideQuick();
+        });
+        quick.Closed([this](auto&&, WindowEventArgs const& e) {
+            // Closing (Alt+F4) only hides it; Sessions keeps running in the tray.
+            if (!closing) {
+                e.Handled(true);
+                HideQuick();
+            }
+        });
+
+        auto queue = quick.DispatcherQueue();
+        auto weak = get_weak();
+        quickSearcher = std::make_unique<Searcher>(databaseFile, [queue, weak](uint64_t ticket, std::wstring, std::vector<Found> results) {
+            queue.TryEnqueue([weak, ticket, results = std::move(results)]() mutable {
+                if (auto app = weak.get(); app && !app->closing) app->QuickResults(ticket, std::move(results));
+            });
+        });
+    }
+
+    void ShowQuick() {
+        if (closing) return;
+        if (!quick) CreateQuick();
+        // A borderless, always-on-top window covering the whole monitor the
+        // pointer is on (taskbar included).
+        auto appWindow = quick.AppWindow();
+        auto presenter = OverlappedPresenter::Create();
+        presenter.SetBorderAndTitleBar(false, false);
+        presenter.IsResizable(false);
+        presenter.IsMaximizable(false);
+        presenter.IsMinimizable(false);
+        presenter.IsAlwaysOnTop(true);
+        appWindow.SetPresenter(presenter);
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        auto display = DisplayArea::GetFromPoint({cursor.x, cursor.y}, DisplayAreaFallback::Primary);
+        appWindow.MoveAndResize(display.OuterBounds());
+        appWindow.IsShownInSwitchers(false);
+        quickShownAt = sessions::NowMs();
+        appWindow.Show();
+        quick.Activate();
+        HWND handle{};
+        quick.as<IWindowNative>()->get_WindowHandle(&handle);
+        if (handle) SetForegroundWindow(handle);
+        quickBox.Text(L"");
+        QuickSearch();
+        quickBox.Focus(FocusState::Programmatic);
+    }
+
+    void HideQuick() {
+        if (!quick) return;
+        if (quickDelay) quickDelay.Stop();
+        quick.AppWindow().Hide();
+    }
+
+    void OpenFromQuick(int64_t id) {
+        quickOpening = true;
+        HideQuick();
+        quickOpening = false;
+        Open(id);
+    }
+
+    void QuickSearch() {
+        std::wstring query = quickBox.Text().c_str();
+        while (!query.empty() && iswspace(query.back())) query.pop_back();
+        while (!query.empty() && iswspace(query.front())) query.erase(query.begin());
+        if (query.empty()) {
+            // Most recent conversations first.
+            ++quickTicket;
+            std::vector<Found> recent;
+            for (size_t i = 0; i < sessionRows.size() && i < 12; ++i) recent.push_back({sessionRows[i].id, 0, {}});
+            ShowQuickRows(recent);
+            return;
+        }
+        quickTicket = quickSearcher->Ask(query);
+    }
+
+    void QuickResults(uint64_t ticket, std::vector<Found> results) {
+        if (ticket != quickTicket) return;
+        if (results.size() > 40) results.resize(40);
+        ShowQuickRows(results);
+    }
+
+    void ShowQuickRows(std::vector<Found> const& results) {
+        std::vector<IInspectable> rows;
+        for (auto const& result : results)
+            if (auto row = Row(result.session)) rows.push_back(QuickRow(*row, result.byMeaning ? L"\x03" + result.snippet : result.snippet));
+        quickItems.ReplaceAll(rows);
+        if (!rows.empty()) {
+            quickList.SelectedIndex(0);
+            quickList.ScrollIntoView(quickItems.GetAt(0));
+        }
+        quickHint.Text(rows.empty() ? L"No conversation matches. Try other words."
+                                    : L"\u2191 \u2193 to choose  \u00B7  Enter to open  \u00B7  Esc to close");
+    }
+
+    // One line per conversation: logo, title, folder and date, and the matching passage.
+    FrameworkElement QuickRow(sessions::SessionRow const& row, std::wstring const& snippet) {
+        Grid grid;
+        grid.Tag(box_value(row.id));
+        grid.ColumnSpacing(12);
+        ColumnDefinition badgeColumn, textColumn, dateColumn;
+        badgeColumn.Width(GridLengthHelper::FromPixels(32));
+        textColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        dateColumn.Width(GridLengthHelper::Auto());
+        grid.ColumnDefinitions().Append(badgeColumn);
+        grid.ColumnDefinitions().Append(textColumn);
+        grid.ColumnDefinitions().Append(dateColumn);
+        auto badge = Badge(row.tool);
+        badge.VerticalAlignment(VerticalAlignment::Center);
+        grid.Children().Append(badge);
+
+        StackPanel text;
+        text.Spacing(1);
+        Grid::SetColumn(text, 1);
+        TextBlock title;
+        title.Text(row.title);
+        title.FontSize(15);
+        title.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+        title.TextTrimming(TextTrimming::CharacterEllipsis);
+        title.MaxLines(1);
+        text.Children().Append(title);
+        if (!snippet.empty()) {
+            auto passage = SnippetBlock(snippet);
+            passage.MaxLines(1);
+            text.Children().Append(passage);
+        } else if (!row.folder.empty()) {
+            TextBlock folder;
+            folder.Text(row.folder);
+            folder.FontSize(12);
+            folder.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
+            text.Children().Append(folder);
+        }
+        grid.Children().Append(text);
+
+        TextBlock when;
+        when.Text((row.folder.empty() || snippet.empty() ? L"" : row.folder + L"  \u00B7  ") + FriendlyDate(row.lastActivity));
+        when.FontSize(12);
+        when.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
+        when.VerticalAlignment(VerticalAlignment::Center);
+        Grid::SetColumn(when, 2);
+        grid.Children().Append(when);
+        Automation::AutomationProperties::SetName(grid, hstring(row.title));
+        return grid;
+    }
+
     // ---- Status and settings ---------------------------------------------
 
     void ShowStatus(sessions::IndexStatus const& status) {
@@ -1013,6 +1293,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         doneIcon.Visibility(status.state == State::Ready ? Visibility::Visible : Visibility::Collapsed);
         problemIcon.Visibility(status.state == State::Failed ? Visibility::Visible : Visibility::Collapsed);
         statusText.Text(status.message);
+        tray.SetTip((L"Sessions \u00B7 " + status.message).c_str());
         ToolTipService::SetToolTip(statusText, box_value(status.message));
         if (status.dataChanged) {
             Reload();
@@ -1203,7 +1484,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (argv) LocalFree(argv);
     try {
         init_apartment(apartment_type::single_threaded);
-        Application::Start([](auto&&) { make<App>(); });
+        Application::Start([](auto&&) {
+            auto app = make_self<App>();
+            int count{};
+            auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+            for (int i = 1; args && i < count; ++i)
+                if (std::wstring_view(args[i]) == L"--tray") app->startInTray = true;
+                else if (std::wstring_view(args[i]) == L"--quick") app->startInTray = app->startQuick = true;
+            if (args) LocalFree(args);
+        });
     } catch (hresult_error const& e) {
         MessageBoxW(nullptr, e.message().c_str(), L"Sessions could not start", MB_OK | MB_ICONERROR);
         return 1;
