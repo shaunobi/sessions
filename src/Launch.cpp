@@ -43,19 +43,42 @@ bool Terminal(std::wstring const& cwd, std::wstring const& command) {
 
 }  // namespace
 
-bool OpenSession(SessionRow const& session) {
-    if (IsWeb(session.tool)) {
-        // "claude:<uuid>", "chatgpt:<id>", "gemini:c_<id>": open the conversation in the browser.
-        auto colon = session.externalId.find(L':');
-        std::wstring id = colon == std::wstring::npos ? session.externalId : session.externalId.substr(colon + 1);
-        if (session.tool == Tool::Gemini && id.rfind(L"c_", 0) == 0) id = id.substr(2);
-        if (!SafeId(id)) return false;
-        switch (session.tool) {
-        case Tool::ClaudeWeb: return Shell(L"https://claude.ai/chat/" + id);
-        case Tool::ChatGptWeb: return Shell(L"https://chatgpt.com/c/" + id);
-        default: return Shell(L"https://gemini.google.com/app/" + id);
-        }
+namespace {
+std::wstring WebId(SessionRow const& session) {
+    // "claude:<uuid>", "chatgpt:<id>", "gemini:c_<id>"
+    auto colon = session.externalId.find(L':');
+    std::wstring id = colon == std::wstring::npos ? session.externalId : session.externalId.substr(colon + 1);
+    if (session.tool == Tool::Gemini && id.rfind(L"c_", 0) == 0) id = id.substr(2);
+    return SafeId(id) ? id : std::wstring();
+}
+}  // namespace
+
+std::wstring WebAddress(SessionRow const& session) {
+    auto id = WebId(session);
+    if (id.empty()) return {};
+    switch (session.tool) {
+    case Tool::ClaudeWeb: return L"https://claude.ai/chat/" + id;
+    case Tool::ChatGptWeb: return L"https://chatgpt.com/c/" + id;
+    case Tool::Gemini: return L"https://gemini.google.com/app/" + id;
+    default: return {};
     }
+}
+
+bool OpensInBrowser(Tool tool) { return tool == Tool::ChatGptWeb || tool == Tool::Gemini; }
+
+bool OpenInBrowser(SessionRow const& session) {
+    auto address = WebAddress(session);
+    return !address.empty() && Shell(address);
+}
+
+bool OpenSession(SessionRow const& session) {
+    if (session.tool == Tool::ClaudeWeb) {
+        // The Claude desktop app opens claude.ai chats itself: claude://claude.ai/chat/<id>.
+        auto id = WebId(session);
+        if (id.empty()) return false;
+        return Shell(L"claude://claude.ai/chat/" + id) || OpenInBrowser(session);
+    }
+    if (IsWeb(session.tool)) return OpenInBrowser(session);
     if (!SafeId(session.externalId)) return false;
     switch (session.tool) {
     case Tool::ClaudeDesktop:
@@ -69,6 +92,15 @@ bool OpenSession(SessionRow const& session) {
         return Shell(L"codex://threads/" + session.externalId);
     case Tool::CodexCli:
         return Terminal(session.cwd, L"codex resume " + session.externalId);
+    case Tool::AntigravityCli:
+        return Terminal(session.cwd, L"agy --conversation " + session.externalId);
+    case Tool::AntigravityDesktop: {
+        // Antigravity has no link to a specific conversation yet: bring the app up.
+        wchar_t local[MAX_PATH]{};
+        GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+        auto app = std::filesystem::path(local) / L"Programs" / L"Antigravity" / L"Antigravity.exe";
+        return Shell(app.wstring());
+    }
     }
     return false;
 }

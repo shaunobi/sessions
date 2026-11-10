@@ -207,10 +207,13 @@ constexpr wchar_t Gemini[] = LR"JS(
     const W = window.WIZ_global_data || {};
     if (!W.SNlM0e) { post({ type: 'signedOut', detail: 'no session token on the Gemini page' }); return; }
     let reqid = Math.floor(Math.random() * 90000) + 10000;
+    // Each Google account signed in to the browser has its own path: /u/0, /u/1, ...
+    const prefix = (location.pathname.match(/^\/u\/\d+/) || [''])[0];
     async function rpc(id, payload) {
       reqid += 100000;
       const body = new URLSearchParams({ 'f.req': JSON.stringify([[[id, JSON.stringify(payload), null, 'generic']]]), at: W.SNlM0e });
-      const url = '/_/BardChatUi/data/batchexecute?rpcids=' + id + '&source-path=%2Fapp&bl=' + encodeURIComponent(W.cfb2h || '') +
+      const url = prefix + '/_/BardChatUi/data/batchexecute?rpcids=' + id + '&source-path=' + encodeURIComponent(prefix + '/app') +
+                  '&bl=' + encodeURIComponent(W.cfb2h || '') +
                   '&f.sid=' + encodeURIComponent(W.FdrFJe || '') + '&hl=en&_reqid=' + reqid + '&rt=c';
       const r = await fetch(url, { method: 'POST', body, credentials: 'include',
                                    headers: { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' } });

@@ -5,6 +5,8 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
+#include <vector>
 #include <memory>
 #include <string>
 
@@ -28,8 +30,17 @@ public:
     void SignIn(Tool tool);
     void SyncAll();
     bool Running() const { return running; }
-    // One line per service: last result, for the settings pane.
-    std::wstring Summary() const;
+    // What Settings shows for each site, from the last check (kept across restarts).
+    struct SiteStatus {
+        Tool tool = Tool::ClaudeWeb;
+        bool checked = false;     // ever checked
+        bool signedIn = false;
+        std::wstring who;         // accounts found, by their names in Sessions
+        std::wstring problem;     // why not signed in, or what failed
+        int64_t checkedAt = 0;
+        int chats = 0;
+    };
+    std::vector<SiteStatus> Statuses();
 
     struct Service;  // one per site, defined in WebSync.cpp
 
@@ -42,7 +53,15 @@ private:
     bool running = false, injected = false, changed = false, rerun = false;
     int stored = 0, failures = 0;
     std::wstring lastError;
-    std::map<Tool, std::wstring> results;
+    struct Outcome {
+        bool signedIn = false;
+        std::set<std::wstring> who;
+        std::wstring problem;
+        int read = 0;
+    };
+    std::map<Tool, Outcome> outcomes;     // this run, per site
+    std::set<std::string> seenAccounts;   // accounts already read this run
+    void SaveOutcomes();
     UINT_PTR watchdog = 0;
     std::chrono::steady_clock::time_point lastActivity;
 

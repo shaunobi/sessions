@@ -129,6 +129,8 @@ public:
         int sessions = 0, skipped = 0, messages = 0;
     };
     Totals Count();
+    // Files skipped for this reason (for example "encrypted").
+    int CountSkipped(std::string const& reason);
 
 private:
     Db db;

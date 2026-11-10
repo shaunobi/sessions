@@ -58,7 +58,7 @@
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src;$(SessionsModels);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
-    <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation Condition="'$(Configuration)'=='Release'">false</GenerateDebugInformation><AdditionalDependencies>windowsapp.lib;shcore.lib;dwmapi.lib;ole32.lib;runtimeobject.lib;shlwapi.lib;shell32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation Condition="'$(Configuration)'=='Release'">false</GenerateDebugInformation><AdditionalDependencies>windowsapp.lib;shcore.lib;bcrypt.lib;crypt32.lib;dwmapi.lib;ole32.lib;runtimeobject.lib;shlwapi.lib;shell32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>app.manifest</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>

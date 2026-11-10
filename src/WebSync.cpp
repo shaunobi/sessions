@@ -53,9 +53,19 @@ static WebSync::Service const Services[] = {
     {Tool::ClaudeWeb, L"Claude", L"https://claude.ai/robots.txt", L"claude.ai", L"https://claude.ai/login", agents::Claude, Family::Claude},
     {Tool::ChatGptWeb, L"ChatGPT", L"https://chatgpt.com/robots.txt", L"chatgpt.com", L"https://chatgpt.com/auth/login", agents::ChatGpt,
      Family::Codex},
-    {Tool::Gemini, L"Gemini", L"https://gemini.google.com/app", L"gemini.google.com", L"https://gemini.google.com/app", agents::Gemini,
+    // Google lets several accounts be signed in at once; each has its own /u/N path.
+    // Unused slots send the browser back to the first account, which is then skipped.
+    {Tool::Gemini, L"Gemini", L"https://gemini.google.com/u/0/app", L"gemini.google.com", L"https://gemini.google.com/app", agents::Gemini,
+     Family::Web},
+    {Tool::Gemini, L"Gemini", L"https://gemini.google.com/u/1/app", L"gemini.google.com", L"https://gemini.google.com/app", agents::Gemini,
+     Family::Web},
+    {Tool::Gemini, L"Gemini", L"https://gemini.google.com/u/2/app", L"gemini.google.com", L"https://gemini.google.com/app", agents::Gemini,
      Family::Web},
 };
+
+namespace {
+std::wstring MetaKey(Tool tool) { return L"web_status_" + std::to_wstring(int(tool)); }
+}
 
 WebSync::WebSync(Index& database, Report onReport, std::filesystem::path profile) : index(database), report(std::move(onReport)) {
     WebBrowser::SetProfileFolder(profile.empty() ? ExecutableFolder() / L"Browser" : profile);
@@ -69,7 +79,7 @@ WebSync::~WebSync() {
 void WebSync::SignIn(Tool tool) {
     Service const* service = nullptr;
     for (auto const& s : Services)
-        if (s.tool == tool) service = &s;
+        if (s.tool == tool && !service) service = &s;
     if (!service) return;
     std::wstring url = service->signInUrl;
     if (!signIn) {
@@ -106,6 +116,8 @@ void WebSync::SyncAll() {
     }
     running = true;
     changed = false;
+    outcomes.clear();
+    seenAccounts.clear();
     queue.clear();
     for (auto const& s : Services) queue.push_back(&s);
     activeSync = this;
@@ -131,6 +143,7 @@ void WebSync::Next() {
     if (queue.empty()) {
         current = nullptr;
         running = false;
+        SaveOutcomes();
         report(L"", changed, true);
         if (std::exchange(rerun, false)) SyncAll();
         return;
@@ -147,8 +160,28 @@ void WebSync::Next() {
 }
 
 void WebSync::Finish(std::wstring const& result) {
-    if (current) results[current->tool] = result;
+    if (current) {
+        auto& outcome = outcomes[current->tool];
+        if (!result.empty()) outcome.problem = result;
+        outcome.read += stored;
+    }
     Next();
+}
+
+// Remembers each site's result (signed in as whom, or what went wrong) so
+// Settings shows it after a restart too.
+void WebSync::SaveOutcomes() {
+    for (auto const& [tool, outcome] : outcomes) {
+        std::wstring who;
+        for (auto const& name : outcome.who) who += (who.empty() ? L"" : L", ") + name;
+        std::wstring value = std::wstring(outcome.signedIn ? L"1" : L"0") + L"\x1F" + who + L"\x1F" +
+                             (outcome.signedIn && outcome.problem.rfind(L"not signed in", 0) == 0 ? std::wstring() : outcome.problem) +
+                             L"\x1F" + std::to_wstring(NowMs());
+        try {
+            index.SetMetaValue(Utf8(MetaKey(tool)), Utf8(value));
+        } catch (...) {
+        }
+    }
 }
 
 void WebSync::OnLoaded(bool succeeded, std::wstring const& url) {
@@ -156,7 +189,7 @@ void WebSync::OnLoaded(bool succeeded, std::wstring const& url) {
     Touch();
     if (url.find(current->host) == std::wstring::npos) {
         // Sent somewhere else, typically a sign-in page.
-        Finish(L"not signed in (sent to " + url + L")");
+        Finish(L"not signed in (the site sent the browser to " + url + L")");
         return;
     }
     if (!succeeded) {
@@ -178,7 +211,7 @@ void WebSync::OnMessage(std::wstring const& text) {
         report(Wide(message.Str("text")), false, false);
     } else if (type == "signedOut") {
         auto detail = message.Str("detail");
-        Finish(L"not signed in. Click its button above to sign in" + (detail.empty() ? std::wstring() : L" (" + Wide(detail) + L")"));
+        Finish(L"not signed in" + (detail.empty() ? std::wstring() : L" (" + Wide(detail) + L")"));
     } else if (type == "error") {
         ++failures;
         lastError = Wide(message.Str("text"));
@@ -186,6 +219,14 @@ void WebSync::OnMessage(std::wstring const& text) {
     } else if (type == "list") {
         std::string account(message.Str("account"));
         index.NameAccount(account, current->accountFamily, std::string(message.Str("accountName")));
+        auto& outcome = outcomes[current->tool];
+        outcome.signedIn = true;
+        outcome.who.insert(index.AccountName(account));
+        if (!seenAccounts.insert(account).second) {
+            // The same account again (an unused Google account slot): nothing more to read.
+            worker->Post(L"{\"type\":\"fetch\",\"ids\":[]}");
+            return;
+        }
         auto known = index.KnownWeb(account);
         std::vector<std::string> present;
         std::string ids = "{\"type\":\"fetch\",\"ids\":[";
@@ -244,10 +285,7 @@ void WebSync::OnMessage(std::wstring const& text) {
             lastError = Wide(e.what());
         }
     } else if (type == "done") {
-        std::wstring result = L"synced";
-        if (stored) result += L" · " + std::to_wstring(stored) + L" new or changed";
-        if (failures) result += L" · " + std::to_wstring(failures) + L" problems (last: " + lastError + L")";
-        Finish(result);
+        Finish(failures ? std::to_wstring(failures) + L" conversations could not be read (last: " + lastError + L")" : std::wstring());
     }
 }
 
@@ -258,13 +296,35 @@ void CALLBACK WebSync::Watchdog(HWND, UINT, UINT_PTR, DWORD) {
     if (std::chrono::steady_clock::now() - self->lastActivity > std::chrono::minutes(3)) self->Finish(L"stopped answering");
 }
 
-std::wstring WebSync::Summary() const {
-    std::wstring out;
-    for (auto const& s : Services) {
-        auto it = results.find(s.tool);
-        out += std::wstring(s.name) + L": " + (it == results.end() ? L"not synced yet" : it->second) + L"\n";
+std::vector<WebSync::SiteStatus> WebSync::Statuses() {
+    std::vector<SiteStatus> out;
+    for (auto tool : {Tool::ClaudeWeb, Tool::ChatGptWeb, Tool::Gemini}) {
+        SiteStatus status;
+        status.tool = tool;
+        std::string saved;
+        try { saved = index.MetaValue(Utf8(MetaKey(tool))); } catch (...) {}
+        auto parts = std::vector<std::wstring>();
+        std::wstring field;
+        for (wchar_t c : Wide(saved)) {
+            if (c == L'\x1F') { parts.push_back(field); field.clear(); }
+            else field.push_back(c);
+        }
+        parts.push_back(field);
+        if (parts.size() >= 4) {
+            status.checked = true;
+            status.signedIn = parts[0] == L"1";
+            status.who = parts[1];
+            status.problem = parts[2];
+            status.checkedAt = _wtoi64(parts[3].c_str());
+        }
+        try {
+            auto q = index.Database().Prepare("SELECT count(*) FROM sessions WHERE family = 3 AND tool = ?1 AND skipped = ''");
+            q.Bind(1, int64_t(tool));
+            if (q.Step()) status.chats = int(q.Int(0));
+        } catch (...) {
+        }
+        out.push_back(std::move(status));
     }
-    if (!out.empty()) out.pop_back();
     return out;
 }
 

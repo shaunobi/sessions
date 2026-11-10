@@ -126,6 +126,8 @@ ToolLook LookOf(Tool tool) {
     case Tool::ClaudeWeb: return {Rgb(0xD9, 0x77, 0x57), L""};
     case Tool::ChatGptWeb: return {Rgb(0x10, 0xA3, 0x7F), L""};
     case Tool::Gemini: return {Rgb(0x42, 0x85, 0xF4), L""};
+    case Tool::AntigravityDesktop: return {Rgb(0x20, 0x21, 0x24), L""};
+    case Tool::AntigravityCli: return {Rgb(0x20, 0x21, 0x24), L""};
     }
     return {Rgb(0x60, 0x60, 0x60), L""};
 }
@@ -252,12 +254,13 @@ constexpr wchar_t ShellMarkup[] = LR"(
           <TextBlock Text='Name each account as you know it. Rebuild re-reads that account&#8217;s sessions from disk.' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
           <StackPanel x:Name='AccountsPanel' Spacing='10'/>
           <TextBlock Text='Web chats' FontWeight='SemiBold' Margin='0,8,0,0'/>
-          <TextBlock Text='Sign in to each site once in Sessions&#8217; own browser. Sessions then reads your chat history from the site in the background, every 30 minutes while it runs.' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
+          <TextBlock TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'
+                     Text='Press a site&#8217;s button to open Sessions&#8217; own browser and sign in there, exactly as in any browser. The sign-in stays in that browser (in the Browser folder next to Sessions); Sessions never sees your password and keeps no copy of it. Each check asks the site who is signed in, then reads new chats. One Claude sign-in covers all of its organizations. To add a second Google account for Gemini, sign in to it from Gemini&#8217;s account menu in that browser.'/>
           <StackPanel Orientation='Horizontal' Spacing='8'>
             <Button x:Name='SignInClaude' Content='Claude'/>
             <Button x:Name='SignInChatGpt' Content='ChatGPT'/>
             <Button x:Name='SignInGemini' Content='Gemini'/>
-            <Button x:Name='SyncWeb' Content='Sync now' Style='{StaticResource AccentButtonStyle}'/>
+            <Button x:Name='SyncWeb' Content='Check and sync now' Style='{StaticResource AccentButtonStyle}'/>
           </StackPanel>
           <TextBlock x:Name='WebInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
@@ -300,6 +303,30 @@ constexpr wchar_t ShellMarkup[] = LR"(
 
 }  // namespace
 
+
+// One line per site for Settings: who is signed in, how many chats, when checked.
+std::wstring WebSummary(sessions::WebSync& sync) {
+    std::wstring out;
+    for (auto const& site : sync.Statuses()) {
+        std::wstring name = sessions::ToolName(site.tool);
+        if (site.tool == Tool::ClaudeWeb) name = L"Claude";
+        std::wstring line;
+        if (!site.checked) {
+            line = L"\u2013  " + name + L": not checked yet";
+        } else if (site.signedIn) {
+            line = L"\u2713  " + name + L": signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L" \u00B7 " +
+                   std::to_wstring(site.chats) + (site.chats == 1 ? L" chat" : L" chats");
+            if (!site.problem.empty()) line += L" \u00B7 " + site.problem;
+        } else {
+            line = L"\u2717  " + name + L": " + (site.problem.empty() ? std::wstring(L"not signed in") : site.problem);
+        }
+        if (site.checkedAt > 0) line += L" \u00B7 checked " + FriendlyDate(site.checkedAt);
+        out += line + L"\n";
+    }
+    if (!out.empty()) out.pop_back();
+    return out;
+}
+
 struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider provider{nullptr};
     Markup::IXamlType GetXamlType(winrt::Windows::UI::Xaml::Interop::TypeName const& type) { return provider.GetXamlType(type); }
@@ -318,7 +345,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     SplitView split{nullptr};
     StackPanel accountsPanel{nullptr};
     MenuFlyout cardMenu{nullptr};
-    Imaging::BitmapImage claudeLogo{nullptr}, claudeCliLogo{nullptr}, chatgptLogo{nullptr}, geminiLogo{nullptr};
+    Imaging::BitmapImage claudeLogo{nullptr}, claudeCliLogo{nullptr}, chatgptLogo{nullptr}, geminiLogo{nullptr}, antigravityLogo{nullptr};
     Collections::IObservableVector<IInspectable> items{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer searchDelay{nullptr};
 
@@ -426,7 +453,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         BuildCardMenu();
 
         toolFilter.Items().Append(box_value(L"All tools"));
-        for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli, Tool::ClaudeWeb, Tool::ChatGptWeb,
+        for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli, Tool::AntigravityDesktop, Tool::AntigravityCli, Tool::ClaudeWeb, Tool::ChatGptWeb,
                           Tool::Gemini}) {
             toolChoices.push_back(tool);
             toolFilter.Items().Append(box_value(sessions::ToolName(tool)));
@@ -540,7 +567,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             if (changed) Reload();
             if (finished) {
                 if (changed && indexer) indexer->Rescan();  // learn the meaning of new web messages
-                if (webInfo) webInfo.Text(webSync->Summary());
+                if (webInfo) webInfo.Text(WebSummary(*webSync));
             }
         });
         Named<Button>(shell, L"SignInClaude").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ClaudeWeb); });
@@ -839,7 +866,14 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         header.ColumnDefinitions().Append(badgeColumn);
         header.ColumnDefinitions().Append(titleColumn);
         auto badge = Badge(row.tool);
-        ToolTipService::SetToolTip(badge, box_value(std::wstring(sessions::ToolName(row.tool)) + L"  \u00B7  " + AccountName(row.account)));
+        std::wstring opens = sessions::OpensInBrowser(row.tool)      ? L"Opens in your browser"
+                             : row.tool == Tool::ClaudeWeb                ? L"Opens in the Claude app"
+                             : sessions::IsCommandLine(row.tool)          ? L"Resumes in Windows Terminal"
+                             : row.tool == Tool::CodexDesktop             ? L"Opens in the Codex app"
+                             : row.tool == Tool::AntigravityDesktop       ? L"Opens the Antigravity app (it has no link to a single conversation)"
+                                                                          : L"Opens in the Claude app";
+        ToolTipService::SetToolTip(badge, box_value(std::wstring(sessions::ToolName(row.tool)) + L"  \u00B7  " + AccountName(row.account) +
+                                                    L"\n" + opens));
         header.Children().Append(badge);
         TextBlock title;
         title.Text(row.title);
@@ -929,6 +963,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI, pixels(32));
         chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT, pixels(20));
         geminiLogo = EmbeddedImage(IDR_LOGO_GEMINI, pixels(32));
+        antigravityLogo = EmbeddedImage(IDR_LOGO_ANTIGRAVITY, pixels(32));
     }
 
     // The tool's own logo. Command-line sessions get a terminal chip on the corner.
@@ -946,9 +981,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             return image;
         };
         const bool cli = sessions::IsCommandLine(tool);
-        const bool web = tool == Tool::ClaudeWeb || tool == Tool::ChatGptWeb;
+        const bool web = sessions::OpensInBrowser(tool);
+        const bool chat = tool == Tool::ClaudeWeb;
         const bool codex = tool == Tool::CodexDesktop || tool == Tool::CodexCli || tool == Tool::ChatGptWeb;
-        auto source = tool == Tool::Gemini ? geminiLogo
+        const bool antigravity = tool == Tool::AntigravityDesktop || tool == Tool::AntigravityCli;
+        auto source = antigravity          ? antigravityLogo
+                      : tool == Tool::Gemini ? geminiLogo
                       : codex              ? chatgptLogo
                       : tool == Tool::ClaudeCli && claudeCliLogo ? claudeCliLogo
                                                                    : claudeLogo;
@@ -985,10 +1023,28 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
             chip.BorderThickness({1, 1, 1, 1});
             FontIcon globe;
-            globe.Glyph(L"\uE774");
+            globe.Glyph(L"\uE774");  // globe: opens in your browser
             globe.FontSize(8);
             globe.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
             chip.Child(globe);
+            frame.Children().Append(chip);
+        }
+        if (chat) {
+            Border chip;
+            chip.Width(15);
+            chip.Height(15);
+            chip.CornerRadius({8, 8, 8, 8});
+            chip.HorizontalAlignment(HorizontalAlignment::Right);
+            chip.VerticalAlignment(VerticalAlignment::Bottom);
+            chip.Margin({0, 0, -4, -4});
+            chip.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0x1E, 0x1E, 0x1E}));
+            chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.BorderThickness({1, 1, 1, 1});
+            FontIcon bubble;
+            bubble.Glyph(L"\uE8BD");  // speech bubble: a Claude chat, opens in the Claude app
+            bubble.FontSize(8);
+            bubble.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.Child(bubble);
             frame.Children().Append(chip);
         }
         if (cli) {
@@ -1067,7 +1123,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     void Open(int64_t id) {
         auto row = Row(id);
         if (!row) return;
-        if (row->tool == Tool::ClaudeDesktop) {
+        if (row->tool == Tool::ClaudeDesktop || row->tool == Tool::ClaudeWeb) {
             // Claude can only open sessions of the organization it is showing;
             // otherwise its link quietly starts a new session.
             std::string active;
@@ -1135,8 +1191,16 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             cardMenu.Items().Append(MenuFlyoutSeparator());
             auto externalId = row->externalId;
             add(L"Copy session id", L"", [externalId] { CopyText(externalId); });
-            auto path = row->path;
-            add(L"Show transcript file", L"", [path] { sessions::RevealFile(path); });
+            if (sessions::IsWeb(row->tool)) {
+                auto copy = *row;
+                if (row->tool == Tool::ClaudeWeb)
+                    add(L"Open in browser", L"\uE774", [copy] { sessions::OpenInBrowser(copy); });
+                auto address = sessions::WebAddress(*row);
+                add(L"Copy link", L"\uE71B", [address] { CopyText(address); });
+            } else {
+                auto path = row->path;
+                add(L"Show transcript file", L"\uE838", [path] { sessions::RevealFile(path); });
+            }
         });
     }
 
@@ -1468,7 +1532,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void BuildSettings() {
-        if (webInfo && webSync) webInfo.Text(webSync->Summary());
+        if (webInfo && webSync) webInfo.Text(WebSummary(*webSync));
         accountsPanel.Children().Clear();
         for (auto const& account : accountRows) {
             Border card;
@@ -1647,7 +1711,7 @@ int RunWebSyncHeadless(int argc, wchar_t** argv) {
     sync = std::make_unique<sessions::WebSync>(index, [&](std::wstring const& status, bool, bool done) {
         if (!status.empty()) print(L"  " + status);
         if (done) {
-            print(sync->Summary());
+            print(WebSummary(*sync));
             finished = true;
             PostQuitMessage(0);
         }

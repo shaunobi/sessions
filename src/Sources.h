@@ -9,9 +9,13 @@
 namespace sessions {
 
 // 5 and 6 are reserved for the Antigravity desktop app and command line.
-enum class Tool : int { ClaudeDesktop = 1, ClaudeCli = 2, CodexDesktop = 3, CodexCli = 4, ClaudeWeb = 7, ChatGptWeb = 8, Gemini = 9 };
+enum class Tool : int {
+    ClaudeDesktop = 1, ClaudeCli = 2, CodexDesktop = 3, CodexCli = 4,
+    AntigravityDesktop = 5, AntigravityCli = 6,
+    ClaudeWeb = 7, ChatGptWeb = 8, Gemini = 9
+};
 // Web: conversations synced from the services' websites rather than read from disk.
-enum class Family : int { Claude = 1, Codex = 2, Web = 3 };
+enum class Family : int { Claude = 1, Codex = 2, Web = 3, Antigravity = 4 };
 
 bool IsWeb(Tool tool);
 bool IsCommandLine(Tool tool);
@@ -57,6 +61,8 @@ struct SourceRoots {
     std::filesystem::path claudeDesktop;       // %APPDATA%/Claude/claude-code-sessions
     std::filesystem::path claudeConfig;        // ~/.claude.json
     std::filesystem::path codexHome;           // ~/.codex
+    std::filesystem::path antigravity;         // ~/.gemini/antigravity/conversations (desktop, encrypted)
+    std::filesystem::path antigravityCli;      // ~/.gemini/antigravity-cli/conversations (agy)
     static SourceRoots Detect();
     std::vector<std::filesystem::path> Watched() const;
 };
@@ -65,6 +71,10 @@ std::vector<SourceFile> FindSourceFiles(SourceRoots const& roots);
 
 ParsedSession ParseClaude(std::filesystem::path const& file);
 ParsedSession ParseCodex(std::filesystem::path const& file);
+ParsedSession ParseAntigravityDesktop(std::filesystem::path const& file);
+ParsedSession ParseAntigravityCli(std::filesystem::path const& file);
+// Antigravity desktop conversation titles, by conversation id.
+std::unordered_map<std::string, std::string> ReadAntigravityTitles();
 
 // Titles, accounts and archive state that the apps keep outside the transcripts.
 struct AppEntry {
@@ -91,6 +101,7 @@ struct AppMetadata {
     std::string claudeDesktopAccount;
     std::unordered_map<std::string, std::string> accountNames;  // suggested names for new accounts
     std::vector<CodexProject> codexProjects;
+    std::unordered_map<std::string, std::string> antigravityTitles;
 };
 
 // The short folder name a card shows: a Codex project name when the folder

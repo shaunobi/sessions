@@ -30,6 +30,11 @@ Installing again mirrors the build into the folder: leftovers from older builds 
 | Codex desktop | `~\.codex\sessions\**\rollout-*.jsonl[.zst]` and `archived_sessions` | `session_meta.source = vscode` or originator `Codex Desktop` | `creator_account_id` |
 | Codex CLI | same rollouts | `cli` and `exec` sources | `creator_account_id` (older rollouts have none) |
 
+| Antigravity desktop | `~\.gemini\antigravity\conversations\*.pb` | file location | none recorded |
+| Antigravity CLI (`agy`) | `~\.gemini\antigravity-cli\conversations\*.db` (SQLite, one protobuf step per row) | file location | none recorded |
+
+Antigravity desktop conversations are AES-256-GCM encrypted with a fixed key built into Antigravity's language server (see `docs/decisions.md`). Sessions does not carry that key: the first time it needs it, it finds it in the installed `language_server_windows_x64.exe` by testing candidates against a real conversation, which only the right key can authenticate. If an Antigravity update changes the key and none fits, the status line says how many Antigravity conversations can't be read; they are never skipped silently. Desktop titles come from Antigravity's `state.vscdb` (only the conversation summaries key is read; the same file holds its sign-in token).
+
 Titles come from the apps' own lists where they exist (the Claude desktop sidebar entry, Codex's `state_5.sqlite` and `session_index.jsonl`, both opened read-only), then from titles written into the transcript, then from the first prompt. Claude subagent transcripts and Codex subagent and review-helper threads are skipped. Antigravity is not read yet.
 
 Only what the person and the AI said is indexed: prompts, the AI's text replies, and in Claude project threads the replies sent through `post_message`. Tool calls, command output, thinking and injected context (system reminders, environment blocks, command echoes) are left out. Messages keep a `kind` column so tool activity can be added later. Nothing is ever written to another tool's files.
@@ -91,6 +96,21 @@ Each card shows the tool's own logo, the session's name as its app shows it, its
 - **Logos** belong to their companies, so they are not committed. `tools\ExtractLogos.ps1` copies them at the highest resolution installed (ChatGPT's white knot from the Codex app, the Claude app tile up to 1240 px, Claude Code's own icon, Antigravity's icon) into `assets\logos`, and `build.ps1` runs it when they are missing.
 
 ## Opening sessions
+
+Every card's logo says where a click goes; hover over it for the words.
+
+| Card | Badge | A click opens |
+|---|---|---|
+| Claude desktop (Code) | none | the session in the Claude app (`claude://code/continue?session=local_…`) |
+| Claude chat (claude.ai) | speech bubble | the chat in the Claude app (`claude://claude.ai/chat/<id>`); right-click › Open in browser |
+| Claude CLI, Codex CLI, Antigravity CLI | `>_` | a Windows Terminal tab resuming it (`claude --resume`, `codex resume`, `agy --conversation`) |
+| Codex desktop | none | the thread in the Codex app (`codex://threads/<id>`) |
+| ChatGPT chat, Gemini chat | globe | the conversation in your browser (`chatgpt.com/c/…`, `gemini.google.com/app/…`); no desktop app accepts a link to one |
+| Antigravity desktop | none | the Antigravity app; it has no link to a single conversation |
+
+The Claude app shows one organization at a time and can only open sessions and chats of that organization, for Code sessions and claude.ai chats alike. Sessions warns when a session belongs to the other organization.
+
+Details:
 
 - **Claude desktop**: `claude://code/continue?session=<local id>`. Claude looks the id up only among the non-archived sessions of the organization it is currently showing; if the session is not there, it quietly opens a new session instead. Sessions therefore guesses which organization Claude is showing (the one whose session was focused most recently) and, for a session in the other organization, asks you to switch organizations in Claude first.
 - **Codex desktop**: `codex://threads/<thread id>`.

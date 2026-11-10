@@ -17,6 +17,8 @@ wchar_t const* ToolName(Tool tool) {
     case Tool::ClaudeCli: return L"Claude CLI";
     case Tool::CodexDesktop: return L"Codex desktop";
     case Tool::CodexCli: return L"Codex CLI";
+    case Tool::AntigravityDesktop: return L"Antigravity desktop";
+    case Tool::AntigravityCli: return L"Antigravity CLI";
     case Tool::ClaudeWeb: return L"Claude chat";
     case Tool::ChatGptWeb: return L"ChatGPT";
     case Tool::Gemini: return L"Gemini";
@@ -25,10 +27,11 @@ wchar_t const* ToolName(Tool tool) {
 }
 
 bool IsWeb(Tool tool) { return tool == Tool::ClaudeWeb || tool == Tool::ChatGptWeb || tool == Tool::Gemini; }
-bool IsCommandLine(Tool tool) { return tool == Tool::ClaudeCli || tool == Tool::CodexCli; }
+bool IsCommandLine(Tool tool) { return tool == Tool::ClaudeCli || tool == Tool::CodexCli || tool == Tool::AntigravityCli; }
 
 Family FamilyOf(Tool tool) {
     if (IsWeb(tool)) return Family::Web;
+    if (tool == Tool::AntigravityDesktop || tool == Tool::AntigravityCli) return Family::Antigravity;
     return tool == Tool::CodexDesktop || tool == Tool::CodexCli ? Family::Codex : Family::Claude;
 }
 
@@ -39,12 +42,14 @@ SourceRoots SourceRoots::Detect() {
     roots.claudeConfig = home / L".claude.json";
     roots.claudeDesktop = RoamingFolder() / L"Claude" / L"claude-code-sessions";
     roots.codexHome = home / L".codex";
+    roots.antigravity = home / L".gemini" / L"antigravity" / L"conversations";
+    roots.antigravityCli = home / L".gemini" / L"antigravity-cli" / L"conversations";
     return roots;
 }
 
 std::vector<fs::path> SourceRoots::Watched() const {
     std::vector<fs::path> out;
-    for (auto const& path : {claudeProjects, claudeDesktop, codexHome / L"sessions", codexHome / L"archived_sessions"}) {
+    for (auto const& path : {claudeProjects, claudeDesktop, codexHome / L"sessions", codexHome / L"archived_sessions", antigravity, antigravityCli}) {
         std::error_code error;
         if (fs::is_directory(path, error)) out.push_back(path);
     }
@@ -100,6 +105,12 @@ std::vector<SourceFile> FindSourceFiles(SourceRoots const& roots) {
             if (filename.rfind(L"rollout-", 0) == 0 && (EndsWith(filename, L".jsonl") || EndsWith(filename, L".jsonl.zst")))
                 Add(out, *it, Family::Codex);
         }
+    }
+    // Antigravity: desktop conversations (.pb) and agy command-line conversations (.db).
+    for (auto const& [folder, extension] : {std::pair{roots.antigravity, L".pb"}, std::pair{roots.antigravityCli, L".db"}}) {
+        std::error_code inner;
+        for (auto const& entry : fs::directory_iterator(folder, inner))
+            if (entry.is_regular_file(inner) && entry.path().extension() == extension) Add(out, entry, Family::Antigravity);
     }
     return out;
 }
@@ -209,6 +220,7 @@ AppMetadata ReadAppMetadata(SourceRoots const& roots) {
         }
         return true;
     });
+    meta.antigravityTitles = ReadAntigravityTitles();
     return meta;
 }
 

@@ -70,6 +70,7 @@ std::string Term(std::wstring const& word, bool prefix) {
 std::string SessionKey(Family family, std::string const& id) {
     // Web conversation ids already carry their service ("claude:...", "chatgpt:...").
     if (family == Family::Web) return "web:" + id;
+    if (family == Family::Antigravity) return "antigravity:" + id;
     return (family == Family::Codex ? "codex:" : "claude:") + id;
 }
 
@@ -80,6 +81,7 @@ std::wstring DefaultAccountName(std::string const& account) {
     std::string family = account.substr(0, colon);
     std::string id = colon == std::string::npos ? std::string() : account.substr(colon + 1, 8);
     if (family == "gemini") return L"Gemini " + Wide(colon == std::string::npos ? "" : account.substr(colon + 1));
+    if (family == "antigravity") return L"Antigravity";
     if (id.empty()) return family == "codex" ? L"ChatGPT (account not recorded)" : L"Claude (account not recorded)";
     return (family == "codex" ? L"ChatGPT account " : L"Claude organization ") + Wide(id);
 }
@@ -218,7 +220,7 @@ void Index::ApplyMetadata(AppMetadata const& meta) {
     };
     std::vector<Row> rows;
     {
-        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file, cwd FROM sessions WHERE skipped = '' AND family IN (1, 2)");
+        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file, cwd FROM sessions WHERE skipped = '' AND family IN (1, 2, 4)");
         while (query.Step())
             rows.push_back({query.Int(0), Family(query.Int(1)), std::string(query.Text(2)), std::string(query.Text(3)), Tool(query.Int(4)),
                             std::string(query.Text(5))});
@@ -239,14 +241,19 @@ void Index::ApplyMetadata(AppMetadata const& meta) {
                 // Recorded nowhere in the transcript: assume the command line's current sign-in.
                 owner = meta.claudeCliAccount.empty() ? "claude:" : meta.claudeCliAccount;
             }
+        } else if (row.family == Family::Antigravity) {
+            owner = "antigravity:";
         } else {
             if (auto it = meta.codex.find(row.external); it != meta.codex.end()) app = &it->second;
             if (owner.empty()) owner = "codex:";
         }
+        std::string agyTitle;
+        if (row.family == Family::Antigravity)
+            if (auto it = meta.antigravityTitles.find(row.external); it != meta.antigravityTitles.end()) agyTitle = it->second;
         update.Bind(1, row.id)
             .Bind(2, int64_t(tool))
             .Bind(3, owner)
-            .Bind(4, app ? std::string_view(app->title) : std::string_view())
+            .Bind(4, app ? std::string_view(app->title) : std::string_view(agyTitle))
             .Bind(5, app ? std::string_view(app->appId) : std::string_view())
             .Bind(6, int64_t(app && app->archived))
             .Bind(7, app && !app->project.empty() ? app->project
@@ -330,7 +337,7 @@ void Index::ForgetAccount(std::string const& account) {
 void Index::ForgetAll() {
     // Files are re-read from disk; synced web conversations are kept.
     db.Exec("DELETE FROM messages_fts WHERE rowid IN (SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
-            "WHERE s.family IN (1, 2)); DELETE FROM sessions WHERE family IN (1, 2);");
+            "WHERE s.family IN (1, 2, 4)); DELETE FROM sessions WHERE family IN (1, 2, 4);");
 }
 
 std::vector<SessionRow> Index::LoadSessions() {
@@ -614,6 +621,12 @@ void Index::AddTag(std::string const& key, std::wstring const& tag) {
 void Index::RemoveTag(std::string const& key, std::wstring const& tag) {
     auto q = db.Prepare("DELETE FROM tags WHERE session_key = ?1 AND tag = ?2");
     q.Bind(1, key).Bind(2, Utf8(tag)).Run();
+}
+
+int Index::CountSkipped(std::string const& reason) {
+    auto q = db.Prepare("SELECT count(*) FROM sessions WHERE skipped = ?1");
+    q.Bind(1, reason);
+    return q.Step() ? int(q.Int(0)) : 0;
 }
 
 Index::Totals Index::Count() {
