@@ -29,3 +29,6 @@ models/
 
 # Tool logos belong to their companies: extracted locally by tools/ExtractLogos.ps1.
 assets/logos/
+
+# Web sign-ins (cookies) for the sync browser.
+Browser/

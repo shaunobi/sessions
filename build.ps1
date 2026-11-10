@@ -25,7 +25,7 @@ foreach ($name in $modelFiles.Keys) {
     if (!(Test-Path $target)) { Invoke-WebRequest $modelFiles[$name] -OutFile $target }
 }
 # Tool logos for the cards come from the apps installed on this PC (not committed).
-if (!(Test-Path (Join-Path $PSScriptRoot 'assets\logos\chatgpt-white.png'))) {
+if (!(Test-Path (Join-Path $PSScriptRoot 'assets\logos\chatgpt-white.png')) -or !(Test-Path (Join-Path $PSScriptRoot 'assets\logos\gemini.png'))) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tools\ExtractLogos.ps1')
 }
 & $nuget restore packages.config -PackagesDirectory $packages -Source 'https://api.nuget.org/v3/index.json' -NonInteractive

@@ -77,6 +77,19 @@ The hardest part: creating a real session in the destination that its app accept
 - **Into Codex:** write a new session file and register it in Codex's own SQLite index (`state_5.sqlite`, `session_index.jsonl`).
 - Across tools, the tool calls do not translate directly (different formats and ids). The likely approach is to copy what was said and turn tool activity into short text notes. To be tested on throwaway sessions.
 
+## Web chats (2026-11-10)
+
+- **Goal:** find every conversation Shaun has had with AI, not only the coding sessions on this PC. Only **Claude, ChatGPT and Gemini** are supported; other assistants are out of scope.
+- **Approach: sync through each site's own backend** (option 2 of three considered), accepting that it will break when the sites change and fixing it then. Rejected for now: periodic official exports (manual, always out of date) and a browser extension (no history before it is installed).
+- Sessions has its own embedded browser (Edge WebView2, loader linked statically). Shaun signs in once per site in it; Sessions never handles passwords. The sign-ins live in a `Browser` profile folder beside the executable.
+- While Sessions runs it syncs 20 seconds after launch and then every 30 minutes, reading only conversations that are new or changed, and removing ones the site no longer lists. Claude reads every organization of the signed-in account; ChatGPT reads the personal account, workspaces, archived chats and project chats; Gemini reads the account's chat history.
+- Web conversations are indexed like local sessions (words and meaning), shown with the service's logo and a globe badge, and open in the default browser.
+- Not yet: Claude and ChatGPT web search results beyond what is in the chats, Google AI Mode search history, phone-only content that the sites do not return.
+
+## Claude organizations (2026-11-10)
+
+- The Claude desktop app shows one organization at a time and opens only that organization's sessions. It keeps the choice in a `lastActiveOrg` cookie and offers no link or command to change it from outside; changing it means quitting Claude, rewriting the cookie and restarting, which stops any running Claude Code sessions. Sessions currently explains this and asks Shaun to switch in Claude. Proposed: a confirmed "Restart Claude in <organization>" button (awaiting Shaun's answer).
+
 ## Findings
 
 Machine: Intel Core i9-13900 (24 cores), 64 GB RAM, NVIDIA GeForce RTX 3070 (8 GB). C: has about 20 GB free; D: has about 1.5 TB free.

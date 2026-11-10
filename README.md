@@ -17,6 +17,7 @@ C: is nearly full, so packages and build output go to **`D:\Build\Sessions`** (o
 - `Sessions.exe` (about 135 MB). The embedding model, its vocabulary, the app image and the tool logos are compiled into it as resources.
 - `Microsoft.WindowsAppRuntime.Bootstrap.dll`, the small loader that finds the Windows App Runtime. WinUI and Windows Machine Learning (ONNX Runtime, DirectML) come from that runtime, which is installed in Windows (2.5 or later), rather than being copied beside the app. Unlike CardFX, the build is framework-dependent, so there are no runtime DLLs in the folder.
 - `Sessions.db`, the index. While the app is open, SQLite keeps `Sessions.db-wal` and `Sessions.db-shm` beside it, and they go away when it closes.
+- `Browser\`, the profile of the built-in browser used for web chat sign-ins (created when web sync first runs).
 
 Installing again mirrors the build into the folder: leftovers from older builds are removed and the database is kept.
 
@@ -56,6 +57,16 @@ The two rankings are merged by reciprocal rank fusion. Short queries (one or two
 - Runtime: ONNX Runtime from **Windows Machine Learning** (`Microsoft.Windows.AI.MachineLearning`), on the GPU through DirectML, falling back to the CPU. The tokenizer (BERT WordPiece, uncased) is written in-house in `src/Tokenizer.cpp`.
 - Messages are split into pieces of up to 254 tokens (at most eight per message). Each piece's vector is stored once in the database, keyed by a hash of its tokens, as 384 signed bytes; re-reading a live session only embeds the new pieces. Vectors are searched in memory by brute force, which takes a few milliseconds at this size, so the SQLite vector add-on was not needed.
 - On this PC (RTX 3070) the first pass over all ~20,500 messages takes about 80 seconds after keyword indexing, and the status shows "Learning meaning" with progress. A search, including embedding the query, takes 15–200 ms. The database grows from about 20 MB to about 33 MB.
+
+## Web chats: Claude, ChatGPT, Gemini
+
+Besides the coding sessions on disk, Sessions syncs your conversations from **claude.ai**, **chatgpt.com** and **gemini.google.com**, using each site's own backend: the same requests the website makes.
+
+- **Sign in once** in Settings › Web chats (Claude, ChatGPT, Gemini). That opens Sessions' own browser at the site's sign-in page. You sign in on the site itself, and Sessions never sees your password. Closing the window starts a sync. The sign-ins are kept in the `Browser` folder beside the executable.
+- **Syncing** runs 20 seconds after launch and then every 30 minutes while Sessions is open, or on **Sync now**. It reads only conversations that are new or changed since the last sync, and removes ones the site no longer lists. The status line shows progress, and Settings shows each site's last result and any problem.
+- **Coverage**: Claude reads every organization of the signed-in account (so both Personal and Sembit). ChatGPT reads the personal account and any workspaces, including archived chats and chats inside projects; the project name shows as the folder. Gemini reads the account's chat list.
+- Web conversations are searched like everything else, carry the service's logo with a globe badge, and open in your default browser (`claude.ai/chat/…`, `chatgpt.com/c/…`, `gemini.google.com/app/…`). The tool filter has a choice for each.
+- **These backends are not public interfaces.** When a site changes, its sync reports an error in Settings; the scripts to fix are in `src/WebAgents.h`.
 
 ## Tray and quick search
 

@@ -77,6 +77,7 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
         }
         Transaction transaction(index.Database());
         for (auto const& [path, _] : known) {
+            if (path.rfind(L"web:", 0) == 0) continue;  // synced from websites, not files
             if (!present.count(path)) {
                 index.Remove(path);
                 changed = true;

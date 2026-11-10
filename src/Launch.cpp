@@ -44,6 +44,18 @@ bool Terminal(std::wstring const& cwd, std::wstring const& command) {
 }  // namespace
 
 bool OpenSession(SessionRow const& session) {
+    if (IsWeb(session.tool)) {
+        // "claude:<uuid>", "chatgpt:<id>", "gemini:c_<id>": open the conversation in the browser.
+        auto colon = session.externalId.find(L':');
+        std::wstring id = colon == std::wstring::npos ? session.externalId : session.externalId.substr(colon + 1);
+        if (session.tool == Tool::Gemini && id.rfind(L"c_", 0) == 0) id = id.substr(2);
+        if (!SafeId(id)) return false;
+        switch (session.tool) {
+        case Tool::ClaudeWeb: return Shell(L"https://claude.ai/chat/" + id);
+        case Tool::ChatGptWeb: return Shell(L"https://chatgpt.com/c/" + id);
+        default: return Shell(L"https://gemini.google.com/app/" + id);
+        }
+    }
     if (!SafeId(session.externalId)) return false;
     switch (session.tool) {
     case Tool::ClaudeDesktop:

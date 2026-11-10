@@ -68,6 +68,8 @@ std::string Term(std::wstring const& word, bool prefix) {
 }
 
 std::string SessionKey(Family family, std::string const& id) {
+    // Web conversation ids already carry their service ("claude:...", "chatgpt:...").
+    if (family == Family::Web) return "web:" + id;
     return (family == Family::Codex ? "codex:" : "claude:") + id;
 }
 
@@ -77,6 +79,7 @@ std::wstring DefaultAccountName(std::string const& account) {
     auto colon = account.find(':');
     std::string family = account.substr(0, colon);
     std::string id = colon == std::string::npos ? std::string() : account.substr(colon + 1, 8);
+    if (family == "gemini") return L"Gemini " + Wide(colon == std::string::npos ? "" : account.substr(colon + 1));
     if (id.empty()) return family == "codex" ? L"ChatGPT (account not recorded)" : L"Claude (account not recorded)";
     return (family == "codex" ? L"ChatGPT account " : L"Claude organization ") + Wide(id);
 }
@@ -215,7 +218,7 @@ void Index::ApplyMetadata(AppMetadata const& meta) {
     };
     std::vector<Row> rows;
     {
-        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file, cwd FROM sessions WHERE skipped = ''");
+        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file, cwd FROM sessions WHERE skipped = '' AND family IN (1, 2)");
         while (query.Step())
             rows.push_back({query.Int(0), Family(query.Int(1)), std::string(query.Text(2)), std::string(query.Text(3)), Tool(query.Int(4)),
                             std::string(query.Text(5))});
@@ -258,6 +261,63 @@ void Index::ApplyMetadata(AppMetadata const& meta) {
     for (auto const& [id, name] : meta.accountNames) suggest.Bind(1, id).Bind(2, name).Run();
 }
 
+std::unordered_map<std::string, int64_t> Index::KnownWeb(std::string const& account) {
+    std::unordered_map<std::string, int64_t> out;
+    auto q = db.Prepare("SELECT external_id, file_modified FROM sessions WHERE family = 3 AND account = ?1");
+    q.Bind(1, account);
+    while (q.Step()) out[std::string(q.Text(0))] = q.Int(1);
+    return out;
+}
+
+void Index::StoreWeb(WebConversation const& c) {
+    SourceFile file;
+    file.path = Wide("web:" + c.id);
+    file.family = Family::Web;
+    file.size = int64_t(c.messages.size());
+    file.modified = c.updated;
+    ParsedSession parsed;
+    parsed.tool = c.tool;
+    parsed.externalId = c.id;
+    parsed.account = c.account;
+    parsed.titleFile = c.title;
+    parsed.created = c.created;
+    parsed.lastActivity = c.updated;
+    parsed.messages = c.messages;
+    for (auto const& m : c.messages)
+        if (m.role == Role::User) {
+            parsed.firstPrompt = Clip(Squash(m.text), 300);
+            break;
+        }
+    if (parsed.messages.empty()) {
+        parsed.skip = true;
+        parsed.skipReason = "no conversation";
+    }
+    Store(file, parsed);
+    auto folder = db.Prepare("UPDATE sessions SET folder = ?2 WHERE path = ?1");
+    folder.Bind(1, Utf8(file.path.wstring())).Bind(2, c.folder).Run();
+}
+
+int Index::RemoveWebMissing(std::string const& account, std::vector<std::string> const& present) {
+    std::unordered_set<std::string> keep(present.begin(), present.end());
+    std::vector<std::wstring> gone;
+    {
+        auto q = db.Prepare("SELECT external_id, path FROM sessions WHERE family = 3 AND account = ?1");
+        q.Bind(1, account);
+        while (q.Step())
+            if (!keep.count(std::string(q.Text(0)))) gone.push_back(q.WText(1));
+    }
+    for (auto const& path : gone) Remove(path);
+    return int(gone.size());
+}
+
+void Index::NameAccount(std::string const& account, Family family, std::string const& suggested) {
+    auto add = db.Prepare("INSERT OR IGNORE INTO accounts(id, family) VALUES(?1, ?2)");
+    add.Bind(1, account).Bind(2, int64_t(family)).Run();
+    if (suggested.empty()) return;
+    auto name = db.Prepare("UPDATE accounts SET suggested = ?2 WHERE id = ?1 AND suggested = ''");
+    name.Bind(1, account).Bind(2, suggested).Run();
+}
+
 void Index::ForgetAccount(std::string const& account) {
     db.Exec("DROP TABLE IF EXISTS temp.forget; CREATE TEMP TABLE forget(id INTEGER PRIMARY KEY);");
     auto pick = db.Prepare("INSERT INTO temp.forget SELECT id FROM sessions WHERE account = ?1");
@@ -268,7 +328,9 @@ void Index::ForgetAccount(std::string const& account) {
 }
 
 void Index::ForgetAll() {
-    db.Exec("DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM sessions;");
+    // Files are re-read from disk; synced web conversations are kept.
+    db.Exec("DELETE FROM messages_fts WHERE rowid IN (SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.family IN (1, 2)); DELETE FROM sessions WHERE family IN (1, 2);");
 }
 
 std::vector<SessionRow> Index::LoadSessions() {

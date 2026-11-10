@@ -8,8 +8,13 @@
 // Reading the four session stores. Nothing here writes to another tool's files.
 namespace sessions {
 
-enum class Tool : int { ClaudeDesktop = 1, ClaudeCli = 2, CodexDesktop = 3, CodexCli = 4 };
-enum class Family : int { Claude = 1, Codex = 2 };
+// 5 and 6 are reserved for the Antigravity desktop app and command line.
+enum class Tool : int { ClaudeDesktop = 1, ClaudeCli = 2, CodexDesktop = 3, CodexCli = 4, ClaudeWeb = 7, ChatGptWeb = 8, Gemini = 9 };
+// Web: conversations synced from the services' websites rather than read from disk.
+enum class Family : int { Claude = 1, Codex = 2, Web = 3 };
+
+bool IsWeb(Tool tool);
+bool IsCommandLine(Tool tool);
 
 wchar_t const* ToolName(Tool tool);
 Family FamilyOf(Tool tool);

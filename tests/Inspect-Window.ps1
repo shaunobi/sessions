@@ -19,5 +19,5 @@ $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
 $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
 "elements: $($all.Count)"
 $all | Select-Object -First $First | ForEach-Object {
-    '{0,-28} {1,-50} {2}' -f $_.Current.ControlType.ProgrammaticName, ($_.Current.Name -replace '\s+', ' ').Substring(0, [Math]::Min(50, $_.Current.Name.Length)), $_.Current.BoundingRectangle
+    '{0,-28} {1,-50} {2}' -f $_.Current.ControlType.ProgrammaticName, (($_.Current.Name -replace '\s+', ' ') + (' ' * 50)).Substring(0, 50).TrimEnd(), $_.Current.BoundingRectangle
 }

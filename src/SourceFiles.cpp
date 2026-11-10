@@ -17,11 +17,18 @@ wchar_t const* ToolName(Tool tool) {
     case Tool::ClaudeCli: return L"Claude CLI";
     case Tool::CodexDesktop: return L"Codex desktop";
     case Tool::CodexCli: return L"Codex CLI";
+    case Tool::ClaudeWeb: return L"Claude chat";
+    case Tool::ChatGptWeb: return L"ChatGPT";
+    case Tool::Gemini: return L"Gemini";
     }
     return L"Unknown";
 }
 
+bool IsWeb(Tool tool) { return tool == Tool::ClaudeWeb || tool == Tool::ChatGptWeb || tool == Tool::Gemini; }
+bool IsCommandLine(Tool tool) { return tool == Tool::ClaudeCli || tool == Tool::CodexCli; }
+
 Family FamilyOf(Tool tool) {
+    if (IsWeb(tool)) return Family::Web;
     return tool == Tool::CodexDesktop || tool == Tool::CodexCli ? Family::Codex : Family::Claude;
 }
 

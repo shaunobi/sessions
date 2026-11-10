@@ -56,6 +56,18 @@ struct PendingMessage {
     std::string text;
 };
 
+// A conversation synced from a website (Claude, ChatGPT, Gemini).
+struct WebConversation {
+    Tool tool = Tool::ClaudeWeb;
+    std::string id;        // "claude:<uuid>", "chatgpt:<id>" or "gemini:<id>"
+    std::string account;   // "claude:<organization>", "codex:<ChatGPT account>", "gemini:<email>"
+    std::string title;
+    std::string folder;    // project name, if any
+    int64_t created = 0;
+    int64_t updated = 0;
+    std::vector<Message> messages;
+};
+
 struct KnownFile {
     int64_t size = 0;
     int64_t modified = 0;
@@ -71,6 +83,13 @@ public:
     void Remove(std::wstring const& path);
     void Store(SourceFile const& file, ParsedSession const& session);
     void ApplyMetadata(AppMetadata const& meta);
+
+    // Web conversations, keyed by their service-prefixed id.
+    std::unordered_map<std::string, int64_t> KnownWeb(std::string const& account);
+    void StoreWeb(WebConversation const& conversation);
+    // Removes conversations of this account that the site no longer lists.
+    int RemoveWebMissing(std::string const& account, std::vector<std::string> const& present);
+    void NameAccount(std::string const& account, Family family, std::string const& suggested);
     void ForgetAccount(std::string const& account);
     void ForgetAll();
     Db& Database() { return db; }

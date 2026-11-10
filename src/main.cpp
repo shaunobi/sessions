@@ -41,6 +41,7 @@
 #include "Search.h"
 #include "Text.h"
 #include "TrayIcon.h"
+#include "WebSync.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
@@ -122,6 +123,9 @@ ToolLook LookOf(Tool tool) {
     case Tool::ClaudeCli: return {Rgb(0xB8, 0x5C, 0x3E), L""};
     case Tool::CodexDesktop: return {Rgb(0x10, 0xA3, 0x7F), L""};
     case Tool::CodexCli: return {Rgb(0x0B, 0x7A, 0x5F), L""};
+    case Tool::ClaudeWeb: return {Rgb(0xD9, 0x77, 0x57), L""};
+    case Tool::ChatGptWeb: return {Rgb(0x10, 0xA3, 0x7F), L""};
+    case Tool::Gemini: return {Rgb(0x42, 0x85, 0xF4), L""};
     }
     return {Rgb(0x60, 0x60, 0x60), L""};
 }
@@ -247,6 +251,15 @@ constexpr wchar_t ShellMarkup[] = LR"(
           <TextBlock Text='Accounts' FontWeight='SemiBold'/>
           <TextBlock Text='Name each account as you know it. Rebuild re-reads that account&#8217;s sessions from disk.' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
           <StackPanel x:Name='AccountsPanel' Spacing='10'/>
+          <TextBlock Text='Web chats' FontWeight='SemiBold' Margin='0,8,0,0'/>
+          <TextBlock Text='Sign in to each site once in Sessions&#8217; own browser. Sessions then reads your chat history from the site in the background, every 30 minutes while it runs.' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
+          <StackPanel Orientation='Horizontal' Spacing='8'>
+            <Button x:Name='SignInClaude' Content='Claude'/>
+            <Button x:Name='SignInChatGpt' Content='ChatGPT'/>
+            <Button x:Name='SignInGemini' Content='Gemini'/>
+            <Button x:Name='SyncWeb' Content='Sync now' Style='{StaticResource AccentButtonStyle}'/>
+          </StackPanel>
+          <TextBlock x:Name='WebInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
           <TextBlock x:Name='IndexInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <StackPanel Orientation='Horizontal' Spacing='8'>
@@ -305,7 +318,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     SplitView split{nullptr};
     StackPanel accountsPanel{nullptr};
     MenuFlyout cardMenu{nullptr};
-    Imaging::BitmapImage claudeLogo{nullptr}, claudeCliLogo{nullptr}, chatgptLogo{nullptr};
+    Imaging::BitmapImage claudeLogo{nullptr}, claudeCliLogo{nullptr}, chatgptLogo{nullptr}, geminiLogo{nullptr};
     Collections::IObservableVector<IInspectable> items{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer searchDelay{nullptr};
 
@@ -313,6 +326,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     std::unique_ptr<sessions::Index> index;
     std::unique_ptr<sessions::Indexer> indexer;
     std::unique_ptr<Searcher> searcher;
+    std::unique_ptr<sessions::WebSync> webSync;
+    Microsoft::UI::Dispatching::DispatcherQueueTimer webTimer{nullptr};
+    std::wstring indexMessage, webMessage;
+    TextBlock webInfo{nullptr};
+    std::vector<Tool> toolChoices;  // parallel to ToolFilter items after "All tools"
 
     std::vector<sessions::SessionRow> sessionRows;
     std::unordered_map<int64_t, size_t> rowById;
@@ -410,8 +428,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         BuildCardMenu();
 
         toolFilter.Items().Append(box_value(L"All tools"));
-        for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli})
+        for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli, Tool::ClaudeWeb, Tool::ChatGptWeb,
+                          Tool::Gemini}) {
+            toolChoices.push_back(tool);
             toolFilter.Items().Append(box_value(sessions::ToolName(tool)));
+        }
         toolFilter.SelectedIndex(0);
         for (auto label : {L"Last activity", L"Best match", L"Created", L"Most messages"}) sortBox.Items().Append(box_value(label));
         sortBox.SelectedIndex(0);
@@ -470,6 +491,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             closing = true;
             searchDelay.Stop();
             if (quickDelay) quickDelay.Stop();
+            if (webTimer) webTimer.Stop();
+            webSync.reset();
             if (indexer) indexer->Stop();
             indexer.reset();
             searcher.reset();
@@ -506,6 +529,30 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
         if (startQuick) ShowQuick();
         indexer->Start();
+
+        webInfo = Named<TextBlock>(shell, L"WebInfo");
+        webSync = std::make_unique<sessions::WebSync>(*index, [this](std::wstring const& status, bool changed, bool finished) {
+            if (closing) return;
+            webMessage = status;
+            ShowCombinedStatus();
+            if (changed) Reload();
+            if (finished) {
+                if (changed && indexer) indexer->Rescan();  // learn the meaning of new web messages
+                if (webInfo) webInfo.Text(webSync->Summary());
+            }
+        });
+        Named<Button>(shell, L"SignInClaude").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ClaudeWeb); });
+        Named<Button>(shell, L"SignInChatGpt").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ChatGptWeb); });
+        Named<Button>(shell, L"SignInGemini").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::Gemini); });
+        Named<Button>(shell, L"SyncWeb").Click([this](auto&&, auto&&) { webSync->SyncAll(); });
+        webTimer = window.DispatcherQueue().CreateTimer();
+        webTimer.Interval(std::chrono::seconds(20));
+        webTimer.IsRepeating(true);
+        webTimer.Tick([this](auto&&, auto&&) {
+            webTimer.Interval(std::chrono::minutes(30));
+            if (webSync && !closing) webSync->SyncAll();
+        });
+        webTimer.Start();
     }
 
     template <typename F>
@@ -618,7 +665,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     // ---- Cards ------------------------------------------------------------
 
     bool Matches(sessions::SessionRow const& row) {
-        if (int tool = toolFilter.SelectedIndex(); tool > 0 && int(row.tool) != tool) return false;
+        if (int tool = toolFilter.SelectedIndex(); tool > 0 && size_t(tool - 1) < toolChoices.size() && row.tool != toolChoices[size_t(tool - 1)])
+            return false;
         if (int account = accountFilter.SelectedIndex(); account > 0 && size_t(account - 1) < accountChoices.size() &&
             row.account != accountChoices[size_t(account - 1)])
             return false;
@@ -817,6 +865,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE, pixels(32));
         claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI, pixels(32));
         chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT, pixels(20));
+        geminiLogo = EmbeddedImage(IDR_LOGO_GEMINI, pixels(32));
     }
 
     // The tool's own logo. Command-line sessions get a terminal chip on the corner.
@@ -833,9 +882,13 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             image.Height(imageSize);
             return image;
         };
-        const bool cli = tool == Tool::ClaudeCli || tool == Tool::CodexCli;
-        const bool codex = tool == Tool::CodexDesktop || tool == Tool::CodexCli;
-        auto source = codex ? chatgptLogo : tool == Tool::ClaudeCli && claudeCliLogo ? claudeCliLogo : claudeLogo;
+        const bool cli = sessions::IsCommandLine(tool);
+        const bool web = tool == Tool::ClaudeWeb || tool == Tool::ChatGptWeb;
+        const bool codex = tool == Tool::CodexDesktop || tool == Tool::CodexCli || tool == Tool::ChatGptWeb;
+        auto source = tool == Tool::Gemini ? geminiLogo
+                      : codex              ? chatgptLogo
+                      : tool == Tool::ClaudeCli && claudeCliLogo ? claudeCliLogo
+                                                                   : claudeLogo;
         if (source && codex) {
             // ChatGPT's white knot on its black tile.
             Border tile;
@@ -856,6 +909,24 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             glyph.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
             tile.Child(glyph);
             frame.Children().Append(tile);
+        }
+        if (web) {
+            Border chip;
+            chip.Width(15);
+            chip.Height(15);
+            chip.CornerRadius({8, 8, 8, 8});
+            chip.HorizontalAlignment(HorizontalAlignment::Right);
+            chip.VerticalAlignment(VerticalAlignment::Bottom);
+            chip.Margin({0, 0, -4, -4});
+            chip.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0x1E, 0x1E, 0x1E}));
+            chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.BorderThickness({1, 1, 1, 1});
+            FontIcon globe;
+            globe.Glyph(L"\uE774");
+            globe.FontSize(8);
+            globe.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.Child(globe);
+            frame.Children().Append(chip);
         }
         if (cli) {
             Border chip;
@@ -1285,16 +1356,18 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
 
     // ---- Status and settings ---------------------------------------------
 
+    sessions::IndexStatus lastIndexStatus;
+
     void ShowStatus(sessions::IndexStatus const& status) {
+        lastIndexStatus = status;
         using State = sessions::IndexStatus::State;
         const bool working = status.state == State::Scanning || status.state == State::Indexing;
         busy.IsActive(working);
         busy.Visibility(working ? Visibility::Visible : Visibility::Collapsed);
         doneIcon.Visibility(status.state == State::Ready ? Visibility::Visible : Visibility::Collapsed);
         problemIcon.Visibility(status.state == State::Failed ? Visibility::Visible : Visibility::Collapsed);
-        statusText.Text(status.message);
-        tray.SetTip((L"Sessions \u00B7 " + status.message).c_str());
-        ToolTipService::SetToolTip(statusText, box_value(status.message));
+        indexMessage = status.message;
+        ShowCombinedStatus();
         if (status.dataChanged) {
             Reload();
             if (!activeQuery.empty() && status.state == State::Ready) {
@@ -1302,6 +1375,18 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 StartSearch();
             }
         }
+    }
+
+    void ShowCombinedStatus() {
+        std::wstring text = webMessage.empty() ? indexMessage : L"Syncing " + webMessage;
+        statusText.Text(text);
+        tray.SetTip((L"Sessions \u00B7 " + text).c_str());
+        ToolTipService::SetToolTip(statusText, box_value(text));
+        using State = sessions::IndexStatus::State;
+        const bool working = !webMessage.empty() || lastIndexStatus.state == State::Scanning || lastIndexStatus.state == State::Indexing;
+        busy.IsActive(working);
+        busy.Visibility(working ? Visibility::Visible : Visibility::Collapsed);
+        doneIcon.Visibility(!working && lastIndexStatus.state == State::Ready ? Visibility::Visible : Visibility::Collapsed);
     }
 
     void ShowProblem(std::wstring const& message) {
@@ -1320,6 +1405,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void BuildSettings() {
+        if (webInfo && webSync) webInfo.Text(webSync->Summary());
         accountsPanel.Children().Clear();
         for (auto const& account : accountRows) {
             Border card;
@@ -1329,7 +1415,9 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             StackPanel stack;
             stack.Spacing(6);
             TextBlock heading;
-            heading.Text((account.family == sessions::Family::Codex ? L"ChatGPT / Codex  ·  " : L"Claude  ·  ") +
+            heading.Text((account.id.rfind("gemini:", 0) == 0          ? L"Gemini  ·  "
+                          : account.family == sessions::Family::Codex ? L"ChatGPT / Codex  ·  "
+                                                                       : L"Claude  ·  ") +
                          Number(account.sessions) + (account.sessions == 1 ? L" session" : L" sessions"));
             heading.FontSize(12);
             heading.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));

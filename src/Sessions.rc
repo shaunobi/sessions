@@ -9,6 +9,7 @@ IDR_LOGO_CLAUDE RCDATA "assets\\logos\\claude.png"
 IDR_LOGO_CLAUDE_CLI RCDATA "assets\\logos\\claude-cli.png"
 IDR_LOGO_CHATGPT RCDATA "assets\\logos\\chatgpt-white.png"
 IDR_LOGO_ANTIGRAVITY RCDATA "assets\\logos\\antigravity.png"
+IDR_LOGO_GEMINI RCDATA "assets\\logos\\gemini.png"
 // Embedding model downloaded by build.ps1 into the build's models folder.
 IDR_MODEL RCDATA "bge-small-en-v1.5.onnx"
 IDR_VOCAB RCDATA "bge-small-en-v1.5.vocab.txt"

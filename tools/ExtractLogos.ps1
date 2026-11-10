@@ -63,11 +63,12 @@ if ($claude) {
     Copy-Logo (Join-Path $a 'Square44x44Logo.targetsize-256.png') 'claude.png'
 } else { Write-Warning 'The Claude desktop app is not installed.' }
 
-# Antigravity desktop and the agy command line: their executables' own icons.
+# Antigravity, the agy command line, Claude Code and the Gemini app: their executables' own icons.
 foreach ($pair in @(
     @{ Path = Join-Path $env:LOCALAPPDATA 'Programs\Antigravity\Antigravity.exe'; Name = 'antigravity.png' },
     @{ Path = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'; Name = 'agy.png' },
-    @{ Path = Join-Path $env:USERPROFILE '.local\bin\claude.exe'; Name = 'claude-cli.png' })) {
+    @{ Path = Join-Path $env:USERPROFILE '.local\bin\claude.exe'; Name = 'claude-cli.png' },
+    @{ Path = Join-Path $env:LOCALAPPDATA 'Google\Gemini\Gemini.exe'; Name = 'gemini.png' })) {
     if (Test-Path -LiteralPath $pair.Path) {
         $bitmap = [ShellImage]::Icon($pair.Path, 256)
         $bitmap.Save((Join-Path $OutputDirectory $pair.Name), [System.Drawing.Imaging.ImageFormat]::Png)
