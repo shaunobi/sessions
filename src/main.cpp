@@ -23,6 +23,7 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Microsoft.UI.Xaml.XamlTypeInfo.h>
+#include <microsoft.ui.xaml.window.h>
 #include <algorithm>
 #include <condition_variable>
 #include <memory>
@@ -127,11 +128,11 @@ ToolLook LookOf(Tool tool) {
 using sessions::Found;
 
 // A PNG embedded in the executable as an image source; nullptr when missing.
-// `size` is the logical size it will be drawn at: Windows' decoder scales the
-// large source down with high quality filtering (including display scaling),
-// instead of XAML shrinking a 256-pixel bitmap at draw time, which leaves
-// jagged edges.
-Imaging::BitmapImage EmbeddedImage(int id, int size = 0) {
+// `pixels` is the exact number of screen pixels it will cover (its size in
+// layout units times the display scale). The large source is scaled down once
+// to that size, so it is drawn 1:1: neither shrunk at draw time (jagged) nor
+// decoded too small and stretched (blurry).
+Imaging::BitmapImage EmbeddedImage(int id, int pixels = 0) {
     auto bytes = sessions::EmbeddedFile(id);
     if (bytes.empty()) return nullptr;
     com_ptr<IStream> memory;
@@ -142,10 +143,10 @@ Imaging::BitmapImage EmbeddedImage(int id, int size = 0) {
                                                   put_abi(stream))))
         return nullptr;
     Imaging::BitmapImage image;
-    if (size > 0) {
-        image.DecodePixelType(Imaging::DecodePixelType::Logical);
-        image.DecodePixelWidth(size);
-        image.DecodePixelHeight(size);
+    if (pixels > 0) {
+        image.DecodePixelType(Imaging::DecodePixelType::Physical);
+        image.DecodePixelWidth(pixels);
+        image.DecodePixelHeight(pixels);
     }
     image.SetSource(stream);
     return image;
@@ -367,10 +368,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         const double scale = GetDpiForSystem() / 96.0;
         window.AppWindow().Resize({int32_t(1060 * scale), int32_t(780 * scale)});
 
-        Named<Image>(shell, L"BrandIcon").Source(EmbeddedImage(IDR_BRAND, 20));
-        claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE, 32);
-        claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI, 32);
-        chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT, 21);
+        LoadLogos();
 
         search = Named<TextBox>(shell, L"Search");
         toolFilter = Named<ComboBox>(shell, L"ToolFilter");
@@ -459,6 +457,19 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             indexer.reset();
             searcher.reset();
             appIcon.Reset();
+        });
+        shell.Loaded([this](auto&&, auto&&) {
+            auto check = [this] {
+                double before = logoScale;
+                LoadLogos();
+                if (before != logoScale) {
+                    cardCache.clear();
+                    shown.clear();
+                    Render();
+                }
+            };
+            check();
+            shell.XamlRoot().Changed([check](auto&&, auto&&) { check(); });
         });
         window.Activate();
         search.Focus(FocusState::Programmatic);
@@ -759,6 +770,23 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         return grid;
     }
 
+    // Decodes the logos for the window's current display scale; again when the
+    // window moves to a monitor with a different scale.
+    double logoScale = 0;
+    void LoadLogos() {
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        double scale = handle ? GetDpiForWindow(handle) / 96.0 : 1.0;
+        if (shell.XamlRoot()) scale = shell.XamlRoot().RasterizationScale();
+        if (scale == logoScale) return;
+        logoScale = scale;
+        auto pixels = [scale](double size) { return int(std::lround(size * scale)); };
+        Named<Image>(shell, L"BrandIcon").Source(EmbeddedImage(IDR_BRAND, pixels(20)));
+        claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE, pixels(32));
+        claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI, pixels(32));
+        chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT, pixels(20));
+    }
+
     // The tool's own logo. Command-line sessions get a terminal chip on the corner.
     FrameworkElement Badge(Tool tool) {
         constexpr double size = 32;
@@ -781,7 +809,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             Border tile;
             tile.CornerRadius({8, 8, 8, 8});
             tile.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0, 0, 0}));
-            tile.Child(logo(source, 21));
+            tile.Child(logo(source, 20));  // even margins keep it on whole pixels
             frame.Children().Append(tile);
         } else if (source) {
             frame.Children().Append(logo(source, size));
