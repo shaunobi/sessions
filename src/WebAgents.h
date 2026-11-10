@@ -35,7 +35,13 @@ async function getJson(url, init) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const r = await fetch(url, Object.assign({ credentials: 'include' }, init || {}));
     if (r.status === 429) { await sleep(5000 * (attempt + 1)); continue; }
-    if (r.status === 401 || r.status === 403) { const e = new Error('signed out'); e.signedOut = true; throw e; }
+    if (r.status === 401 || r.status === 403) {
+      let detail = '';
+      try { detail = (await r.text()).replace(/\s+/g, ' ').slice(0, 300); } catch (e) {}
+      const e = new Error(url.split('?')[0] + ' answered ' + r.status + (detail ? ': ' + detail : ''));
+      e.signedOut = true;
+      throw e;
+    }
     if (!r.ok) throw new Error(url.split('?')[0] + ' answered ' + r.status);
     return r.json();
   }
@@ -92,7 +98,7 @@ constexpr wchar_t Claude[] = LR"JS(
     }
     post({ type: 'done' });
   } catch (e) {
-    post(e.signedOut ? { type: 'signedOut' } : { type: 'error', text: 'Claude: ' + e.message, fatal: true });
+    post(e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'Claude: ' + e.message, fatal: true });
   }
 })();
 )JS";
@@ -101,7 +107,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
 (async () => {
   try {
     const session = await getJson('/api/auth/session');
-    if (!session || !session.accessToken) { post({ type: 'signedOut' }); return; }
+    if (!session || !session.accessToken) { post({ type: 'signedOut', detail: 'no access token in /api/auth/session' }); return; }
     const auth = { Authorization: 'Bearer ' + session.accessToken };
     // Personal account and any workspaces.
     let accounts = [];
@@ -188,7 +194,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
     }
     post({ type: 'done' });
   } catch (e) {
-    post(e.signedOut ? { type: 'signedOut' } : { type: 'error', text: 'ChatGPT: ' + e.message, fatal: true });
+    post(e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'ChatGPT: ' + e.message, fatal: true });
   }
 })();
 )JS";
@@ -199,7 +205,7 @@ constexpr wchar_t Gemini[] = LR"JS(
 (async () => {
   try {
     const W = window.WIZ_global_data || {};
-    if (!W.SNlM0e) { post({ type: 'signedOut' }); return; }
+    if (!W.SNlM0e) { post({ type: 'signedOut', detail: 'no session token on the Gemini page' }); return; }
     let reqid = Math.floor(Math.random() * 90000) + 10000;
     async function rpc(id, payload) {
       reqid += 100000;
@@ -265,7 +271,7 @@ constexpr wchar_t Gemini[] = LR"JS(
     }
     post({ type: 'done' });
   } catch (e) {
-    post(e.signedOut ? { type: 'signedOut' } : { type: 'error', text: 'Gemini: ' + e.message, fatal: true });
+    post(e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'Gemini: ' + e.message, fatal: true });
   }
 })();
 )JS";

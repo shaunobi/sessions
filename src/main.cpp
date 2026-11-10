@@ -399,8 +399,6 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         window.ExtendsContentIntoTitleBar(true);
         window.AppWindow().TitleBar().PreferredHeightOption(TitleBarHeightOption::Tall);
         window.SetTitleBar(Named<Grid>(shell, L"TitleArea"));
-        const double scale = GetDpiForSystem() / 96.0;
-        window.AppWindow().Resize({int32_t(1060 * scale), int32_t(780 * scale)});
 
         LoadLogos();
 
@@ -472,6 +470,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
 
         databaseFile = sessions::Index::DefaultFile();
         index = std::make_unique<sessions::Index>(databaseFile);
+        RestorePlacement();
         Reload();
 
         auto queue = window.DispatcherQueue();
@@ -488,6 +487,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         });
 
         window.Closed([this](auto&&, auto&&) {
+            SavePlacement();
             closing = true;
             searchDelay.Stop();
             if (quickDelay) quickDelay.Stop();
@@ -505,9 +505,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         // Minimizing puts Sessions in the notification area instead of the taskbar.
         window.AppWindow().Changed([this](AppWindow const& sender, AppWindowChangedEventArgs const& args) {
             if (!args.DidPresenterChange() && !args.DidSizeChange()) return;
-            if (auto presenter = sender.Presenter().try_as<OverlappedPresenter>();
-                presenter && presenter.State() == OverlappedPresenterState::Minimized)
+            auto presenter = sender.Presenter().try_as<OverlappedPresenter>();
+            if (presenter && presenter.State() == OverlappedPresenterState::Minimized) {
+                SavePlacement();
                 sender.Hide();
+            }
         });
         tray.Create([this] { ShowQuick(); }, [this] { ShowMain(); });
         shell.Loaded([this](auto&&, auto&&) {
@@ -553,6 +555,67 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             if (webSync && !closing) webSync->SyncAll();
         });
         webTimer.Start();
+    }
+
+    // ---- Window placement ---------------------------------------------------
+
+    // Opens where it was last closed, at the same size (and maximized if it was).
+    // The first time, or if that spot is no longer on any screen: centered on the
+    // screen under the pointer, wide enough for four columns of cards.
+    void RestorePlacement() {
+        auto appWindow = window.AppWindow();
+        std::string saved;
+        try { saved = index->MetaValue("window_placement"); } catch (...) {}
+        int x{}, y{}, w{}, h{}, maximized{};
+        if (sscanf_s(saved.c_str(), "%d,%d,%d,%d,%d", &x, &y, &w, &h, &maximized) == 5 && w > 200 && h > 200) {
+            auto area = DisplayArea::GetFromRect({x, y, w, h}, DisplayAreaFallback::None);
+            if (area) {
+                auto work = area.WorkArea();
+                // At least a title bar's worth must be visible.
+                bool visible = x + w > work.X + 100 && x < work.X + work.Width - 100 && y >= work.Y - 10 && y < work.Y + work.Height - 60;
+                if (visible) {
+                    appWindow.MoveAndResize({x, y, w, h});
+                    if (maximized)
+                        if (auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>()) presenter.Maximize();
+                    return;
+                }
+            }
+        }
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        auto area = DisplayArea::GetFromPoint({cursor.x, cursor.y}, DisplayAreaFallback::Primary);
+        auto work = area.WorkArea();
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        const double scale = (handle ? GetDpiForWindow(handle) : GetDpiForSystem()) / 96.0;
+        // Four 300-wide cards with their gaps, the page padding and a scroll bar.
+        int width = std::min(int(1330 * scale), work.Width - int(40 * scale));
+        int height = std::min(int(900 * scale), work.Height - int(40 * scale));
+        appWindow.MoveAndResize({work.X + (work.Width - width) / 2, work.Y + (work.Height - height) / 2, width, height});
+    }
+
+    void SavePlacement() {
+        if (!window || !index) return;
+        auto appWindow = window.AppWindow();
+        auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>();
+        if (!presenter) return;
+        int maximized = presenter.State() == OverlappedPresenterState::Maximized ? 1 : 0;
+        // The restored (not maximized) rectangle, so un-maximizing later returns to it.
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        WINDOWPLACEMENT placement{sizeof(placement)};
+        RECT r{};
+        if (handle && GetWindowPlacement(handle, &placement)) {
+            r = placement.rcNormalPosition;  // workspace coordinates; equal to screen coordinates without a top/left taskbar
+            if (presenter.State() == OverlappedPresenterState::Minimized) maximized = (placement.flags & WPF_RESTORETOMAXIMIZED) ? 1 : 0;
+        } else {
+            auto position = appWindow.Position();
+            auto size = appWindow.Size();
+            r = {position.X, position.Y, position.X + size.Width, position.Y + size.Height};
+        }
+        char text[96];
+        sprintf_s(text, "%ld,%ld,%ld,%ld,%d", r.left, r.top, r.right - r.left, r.bottom - r.top, maximized);
+        try { index->SetMetaValue("window_placement", text); } catch (...) {}
     }
 
     template <typename F>
@@ -692,7 +755,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         else
             std::stable_sort(visible.begin(), visible.end(), byActivity);
 
-        constexpr size_t limit = 600;
+        constexpr size_t limit = 3000;
         std::vector<int64_t> ids;
         std::vector<IInspectable> elements;
         for (size_t i = 0; i < visible.size() && i < limit; ++i) {
@@ -1558,11 +1621,59 @@ int RunHeadless(int argc, wchar_t** argv) {
 
 }  // namespace
 
+namespace {
+
+int RunWebSyncHeadless(int argc, wchar_t** argv) {
+    std::filesystem::path database = sessions::Index::DefaultFile(), profile;
+    for (int i = 1; i < argc; ++i) {
+        std::wstring_view arg(argv[i]);
+        if (arg == L"--db" && i + 1 < argc) database = argv[++i];
+        else if (arg == L"--profile" && i + 1 < argc) profile = argv[++i];
+    }
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE) {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+        out = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    auto print = [out](std::wstring const& text) {
+        auto bytes = sessions::Utf8(text + L"\n");
+        DWORD written{};
+        WriteFile(out, bytes.data(), DWORD(bytes.size()), &written, nullptr);
+    };
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool finished = false;
+    sessions::Index index(database);
+    std::unique_ptr<sessions::WebSync> sync;
+    sync = std::make_unique<sessions::WebSync>(index, [&](std::wstring const& status, bool, bool done) {
+        if (!status.empty()) print(L"  " + status);
+        if (done) {
+            print(sync->Summary());
+            finished = true;
+            PostQuitMessage(0);
+        }
+    }, profile);
+    sync->SyncAll();
+    MSG msg{};
+    while (!finished && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    sync.reset();
+    return 0;
+}
+
+}  // namespace
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int argc{};
     auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; argv && i < argc; ++i) {
         std::wstring_view arg(argv[i]);
+        if (arg == L"--websync") {
+            int code = RunWebSyncHeadless(argc, argv);
+            LocalFree(argv);
+            return code;
+        }
         if (arg == L"--index" || arg == L"--search") {
             int code = RunHeadless(argc, argv);
             LocalFree(argv);

@@ -19,7 +19,8 @@ public:
     // or updated; finished: the whole run is over.
     using Report = std::function<void(std::wstring const& status, bool changed, bool finished)>;
 
-    WebSync(Index& index, Report report);
+    // `profile`: the browser profile folder; by default Browser beside the executable.
+    WebSync(Index& index, Report report, std::filesystem::path profile = {});
     ~WebSync();
 
     // Opens a visible browser at the service's sign-in page. Closing that
@@ -38,7 +39,7 @@ private:
     std::unique_ptr<WebBrowser> worker, signIn;
     std::deque<Service const*> queue;
     Service const* current = nullptr;
-    bool running = false, injected = false, changed = false;
+    bool running = false, injected = false, changed = false, rerun = false;
     int stored = 0, failures = 0;
     std::wstring lastError;
     std::map<Tool, std::wstring> results;

@@ -3,6 +3,8 @@
 #include "Text.h"
 #include "WebAgents.h"
 #include <cstdio>
+#include <cwctype>
+#include <utility>
 #include <unordered_set>
 
 namespace sessions {
@@ -55,8 +57,8 @@ static WebSync::Service const Services[] = {
      Family::Web},
 };
 
-WebSync::WebSync(Index& database, Report onReport) : index(database), report(std::move(onReport)) {
-    WebBrowser::SetProfileFolder(ExecutableFolder() / L"Browser");
+WebSync::WebSync(Index& database, Report onReport, std::filesystem::path profile) : index(database), report(std::move(onReport)) {
+    WebBrowser::SetProfileFolder(profile.empty() ? ExecutableFolder() / L"Browser" : profile);
 }
 
 WebSync::~WebSync() {
@@ -73,6 +75,20 @@ void WebSync::SignIn(Tool tool) {
     if (!signIn) {
         signIn = std::make_unique<WebBrowser>();
         signIn->OnClosed([this] { SyncAll(); });
+        // Once a site shows a page other than its sign-in pages, sign-in is done:
+        // sync straight away rather than waiting for the window to close.
+        signIn->OnLoaded([this](bool ok, std::wstring const& address) {
+            if (!ok) return;
+            std::wstring lower = address;
+            for (auto& ch : lower) ch = wchar_t(towlower(ch));
+            for (auto const& s : Services) {
+                if (lower.find(s.host) == std::wstring::npos) continue;
+                for (auto marker : {L"/login", L"/auth", L"/signin", L"/sign-in", L"/oauth", L"/magic-link", L"accounts.google"})
+                    if (lower.find(marker) != std::wstring::npos) return;
+                SyncAll();
+                return;
+            }
+        });
         signIn->Create(L"Sessions · sign in", true, [this, url](bool ok) {
             if (ok) signIn->Navigate(url);
             else report(L"Could not start the sign-in browser (Microsoft Edge WebView2 is missing).", false, true);
@@ -84,7 +100,10 @@ void WebSync::SignIn(Tool tool) {
 }
 
 void WebSync::SyncAll() {
-    if (running) return;
+    if (running) {
+        rerun = true;  // run again when this one ends, to pick up a new sign-in
+        return;
+    }
     running = true;
     changed = false;
     queue.clear();
@@ -113,6 +132,7 @@ void WebSync::Next() {
         current = nullptr;
         running = false;
         report(L"", changed, true);
+        if (std::exchange(rerun, false)) SyncAll();
         return;
     }
     current = queue.front();
@@ -136,7 +156,7 @@ void WebSync::OnLoaded(bool succeeded, std::wstring const& url) {
     Touch();
     if (url.find(current->host) == std::wstring::npos) {
         // Sent somewhere else, typically a sign-in page.
-        Finish(L"not signed in");
+        Finish(L"not signed in (sent to " + url + L")");
         return;
     }
     if (!succeeded) {
@@ -157,7 +177,8 @@ void WebSync::OnMessage(std::wstring const& text) {
     if (type == "status") {
         report(Wide(message.Str("text")), false, false);
     } else if (type == "signedOut") {
-        Finish(L"not signed in");
+        auto detail = message.Str("detail");
+        Finish(L"not signed in. Click its button above to sign in" + (detail.empty() ? std::wstring() : L" (" + Wide(detail) + L")"));
     } else if (type == "error") {
         ++failures;
         lastError = Wide(message.Str("text"));

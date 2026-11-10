@@ -62,11 +62,15 @@ The two rankings are merged by reciprocal rank fusion. Short queries (one or two
 
 Besides the coding sessions on disk, Sessions syncs your conversations from **claude.ai**, **chatgpt.com** and **gemini.google.com**, using each site's own backend: the same requests the website makes.
 
-- **Sign in once** in Settings › Web chats (Claude, ChatGPT, Gemini). That opens Sessions' own browser at the site's sign-in page. You sign in on the site itself, and Sessions never sees your password. Closing the window starts a sync. The sign-ins are kept in the `Browser` folder beside the executable.
+- **Sign in once** in Settings › Web chats (Claude, ChatGPT, Gemini). That opens Sessions' own browser at the site's sign-in page. You sign in on the site itself, and Sessions never sees your password. A sync starts as soon as the site shows a page other than its sign-in pages, and again when you close the window. The sign-ins are kept in the `Browser` folder beside the executable.
 - **Syncing** runs 20 seconds after launch and then every 30 minutes while Sessions is open, or on **Sync now**. It reads only conversations that are new or changed since the last sync, and removes ones the site no longer lists. The status line shows progress, and Settings shows each site's last result and any problem.
 - **Coverage**: Claude reads every organization of the signed-in account (so both Personal and Sembit). ChatGPT reads the personal account and any workspaces, including archived chats and chats inside projects; the project name shows as the folder. Gemini reads the account's chat list.
 - Web conversations are searched like everything else, carry the service's logo with a globe badge, and open in your default browser (`claude.ai/chat/…`, `chatgpt.com/c/…`, `gemini.google.com/app/…`). The tool filter has a choice for each.
 - **These backends are not public interfaces.** When a site changes, its sync reports an error in Settings; the scripts to fix are in `src/WebAgents.h`.
+
+## Window
+
+Sessions opens where it was last closed or minimized, at the same size, maximized if it was. The first time, or if that spot is no longer on a screen, it opens centered on the screen under the pointer, wide enough for four columns of cards.
 
 ## Tray and quick search
 
@@ -101,7 +105,7 @@ Right-click a card to add or remove tags, copy the session id, or show the trans
 .\tests\Try-Search.ps1 -Query 'zoom' -OutputPath D:\Build\Sessions\shot.png   # types into the open window and captures it
 ```
 
-`Sessions.exe --index [--db file] [--search "words"]` runs one scan (and the meaning pass) without a window and prints a summary, with meaning-only results marked `[meaning NN]`. It is what the test uses.
+`Sessions.exe --websync [--db file] [--profile folder]` runs one web sync without a window and prints its progress and each site's result. `Sessions.exe --index [--db file] [--search "words"]` runs one scan (and the meaning pass) without a window and prints a summary, with meaning-only results marked `[meaning NN]`. It is what the test uses.
 
 ## Libraries
 
