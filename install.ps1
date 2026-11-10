@@ -9,7 +9,8 @@ $source = Join-Path $BuildRoot 'Release'
 if (!(Test-Path (Join-Path $source 'Sessions.exe'))) { & (Join-Path $PSScriptRoot 'build.ps1') -BuildRoot $BuildRoot | Out-Null }
 if (Get-Process Sessions -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$InstallFolder*" }) { throw 'Close Sessions before installing.' }
 New-Item -ItemType Directory -Force $InstallFolder | Out-Null
-robocopy $source $InstallFolder /E /XF Sessions.db Sessions.db-wal Sessions.db-shm *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
+# Mirror: files from older builds are removed; the database is never touched.
+robocopy $source $InstallFolder /MIR /XF Sessions.db Sessions.db-wal Sessions.db-shm *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Copy failed (robocopy exit $LASTEXITCODE)." }
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in 'Programs', 'DesktopDirectory') {

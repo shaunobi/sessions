@@ -1,10 +1,13 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <shlwapi.h>
+#include <shcore.h>
 #undef GetCurrentTime
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.System.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.UI.Xaml.Interop.h>
 #include <winrt/Microsoft.UI.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
@@ -28,6 +31,8 @@
 #include <unordered_map>
 #include "AppIcon.h"
 #include "AppTheme.h"
+#include "Embedded.h"
+#include "ResourceIds.h"
 #include "Index.h"
 #include "Indexer.h"
 #include "Embedder.h"
@@ -120,6 +125,22 @@ ToolLook LookOf(Tool tool) {
 }
 
 using sessions::Found;
+
+// A PNG embedded in the executable as an image source; nullptr when missing.
+Imaging::BitmapImage EmbeddedImage(int id) {
+    auto bytes = sessions::EmbeddedFile(id);
+    if (bytes.empty()) return nullptr;
+    com_ptr<IStream> memory;
+    memory.attach(SHCreateMemStream(reinterpret_cast<BYTE const*>(bytes.data()), UINT(bytes.size())));
+    if (!memory) return nullptr;
+    winrt::Windows::Storage::Streams::IRandomAccessStream stream{nullptr};
+    if (FAILED(CreateRandomAccessStreamOverStream(memory.get(), BSOS_DEFAULT, guid_of<winrt::Windows::Storage::Streams::IRandomAccessStream>(),
+                                                  put_abi(stream))))
+        return nullptr;
+    Imaging::BitmapImage image;
+    image.SetSource(stream);
+    return image;
+}
 
 // Runs searches on its own thread and database connection so typing never waits
 // on the index. Only the latest query's results are delivered.
@@ -273,6 +294,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     SplitView split{nullptr};
     StackPanel accountsPanel{nullptr};
     MenuFlyout cardMenu{nullptr};
+    Imaging::BitmapImage claudeLogo{nullptr}, claudeCliLogo{nullptr}, chatgptLogo{nullptr};
     Collections::IObservableVector<IInspectable> items{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer searchDelay{nullptr};
 
@@ -336,8 +358,10 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         const double scale = GetDpiForSystem() / 96.0;
         window.AppWindow().Resize({int32_t(1060 * scale), int32_t(780 * scale)});
 
-        auto brand = sessions::ExecutableFolder() / L"Sessions.png";
-        Named<Image>(shell, L"BrandIcon").Source(Imaging::BitmapImage(Uri(L"file:///" + brand.generic_wstring())));
+        Named<Image>(shell, L"BrandIcon").Source(EmbeddedImage(IDR_BRAND));
+        claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE);
+        claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI);
+        chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT);
 
         search = Named<TextBox>(shell, L"Search");
         toolFilter = Named<ComboBox>(shell, L"ToolFilter");
@@ -606,7 +630,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         if (!activeQuery.empty())
             if (auto it = found.find(row.id); it != found.end())
                 snippet = (it->second.byMeaning ? L"\x03" : L"") + it->second.snippet;
-        std::wstring signature = row.title + L"\x1F" + AccountName(row.account) + L"\x1F" + std::to_wstring(row.messages) + L"\x1F" +
+        std::wstring signature = row.title + L"\x1F" + row.folder + L"\x1F" + AccountName(row.account) + L"\x1F" + std::to_wstring(row.messages) + L"\x1F" +
                                  std::to_wstring(row.lastActivity) + L"\x1F" + std::to_wstring(int(row.tool)) + L"\x1F" + snippet +
                                  (row.archived ? L"\x1F" L"a" : L"");
         for (auto const& tag : row.tags) signature += L"\x1F#" + tag;
@@ -647,23 +671,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         Grid header;
         header.ColumnSpacing(10);
         ColumnDefinition badgeColumn, titleColumn;
-        badgeColumn.Width(GridLengthHelper::FromPixels(28));
+        badgeColumn.Width(GridLengthHelper::FromPixels(32));
         titleColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
         header.ColumnDefinitions().Append(badgeColumn);
         header.ColumnDefinitions().Append(titleColumn);
-        auto look = LookOf(row.tool);
-        Border badge;
-        badge.Width(28);
-        badge.Height(28);
-        badge.CornerRadius({6, 6, 6, 6});
-        badge.VerticalAlignment(VerticalAlignment::Top);
-        badge.Background(SolidColorBrush(look.color));
-        FontIcon glyph;
-        glyph.Glyph(look.glyph);
-        glyph.FontSize(13);
-        glyph.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
-        badge.Child(glyph);
-        ToolTipService::SetToolTip(badge, box_value(sessions::ToolName(row.tool)));
+        auto badge = Badge(row.tool);
+        ToolTipService::SetToolTip(badge, box_value(std::wstring(sessions::ToolName(row.tool)) + L"  \u00B7  " + AccountName(row.account)));
         header.Children().Append(badge);
         TextBlock title;
         title.Text(row.title);
@@ -688,12 +701,25 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             meta.Children().Append(block);
             return block;
         };
-        line(std::wstring(sessions::ToolName(row.tool)) + L"  ·  " + AccountName(row.account));
-        std::wstring when = FriendlyDate(row.lastActivity) + L"  ·  " + Number(row.messages) +
+        std::wstring when = FriendlyDate(row.lastActivity) + L"  \u00B7  " + Number(row.messages) +
                             (row.messages == 1 ? L" message" : L" messages");
-        if (row.archived) when += L"  ·  archived";
-        auto dateLine = line(when);
-        if (row.created > 0) ToolTipService::SetToolTip(dateLine, box_value(L"Started " + FriendlyDate(row.created)));
+        if (row.archived) when += L"  \u00B7  archived";
+        auto dateLine = line(L"");
+        if (!row.folder.empty()) {
+            // Folder glyph, folder name, then date and size.
+            Documents::Run icon;
+            icon.Text(L"\uE8B7 ");
+            icon.FontFamily(FontFamily(L"Segoe Fluent Icons"));
+            dateLine.Inlines().Append(icon);
+            Documents::Run folder;
+            folder.Text(row.folder + L"  \u00B7  ");
+            folder.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+            dateLine.Inlines().Append(folder);
+            ToolTipService::SetToolTip(dateLine, box_value(row.cwd));
+        }
+        Documents::Run rest;
+        rest.Text(when);
+        dateLine.Inlines().Append(rest);
         grid.Children().Append(meta);
 
         if (!snippet.empty()) {
@@ -722,6 +748,69 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             grid.Children().Append(chips);
         }
         return grid;
+    }
+
+    // The tool's own logo. Command-line sessions get a terminal chip on the corner.
+    FrameworkElement Badge(Tool tool) {
+        constexpr double size = 32;
+        Grid frame;
+        frame.Width(size);
+        frame.Height(size);
+        frame.VerticalAlignment(VerticalAlignment::Top);
+        auto logo = [&](Imaging::BitmapImage const& source, double imageSize) -> UIElement {
+            Image image;
+            image.Source(source);
+            image.Width(imageSize);
+            image.Height(imageSize);
+            return image;
+        };
+        const bool cli = tool == Tool::ClaudeCli || tool == Tool::CodexCli;
+        const bool codex = tool == Tool::CodexDesktop || tool == Tool::CodexCli;
+        auto source = codex ? chatgptLogo : tool == Tool::ClaudeCli && claudeCliLogo ? claudeCliLogo : claudeLogo;
+        if (source && codex) {
+            // ChatGPT's white knot on its black tile.
+            Border tile;
+            tile.CornerRadius({8, 8, 8, 8});
+            tile.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0, 0, 0}));
+            tile.Child(logo(source, 21));
+            frame.Children().Append(tile);
+        } else if (source) {
+            frame.Children().Append(logo(source, size));
+        } else {
+            auto look = LookOf(tool);
+            Border tile;
+            tile.CornerRadius({8, 8, 8, 8});
+            tile.Background(SolidColorBrush(look.color));
+            FontIcon glyph;
+            glyph.Glyph(look.glyph);
+            glyph.FontSize(14);
+            glyph.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            tile.Child(glyph);
+            frame.Children().Append(tile);
+        }
+        if (cli) {
+            Border chip;
+            chip.Width(18);
+            chip.Height(13);
+            chip.CornerRadius({3, 3, 3, 3});
+            chip.HorizontalAlignment(HorizontalAlignment::Right);
+            chip.VerticalAlignment(VerticalAlignment::Bottom);
+            chip.Margin({0, 0, -5, -4});
+            chip.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0x1E, 0x1E, 0x1E}));
+            chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.BorderThickness({1, 1, 1, 1});
+            TextBlock prompt;
+            prompt.Text(L">_");
+            prompt.FontFamily(FontFamily(L"Cascadia Mono, Consolas"));
+            prompt.FontSize(8);
+            prompt.FontWeight(Microsoft::UI::Text::FontWeights::Bold());
+            prompt.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            prompt.HorizontalAlignment(HorizontalAlignment::Center);
+            prompt.VerticalAlignment(VerticalAlignment::Center);
+            chip.Child(prompt);
+            frame.Children().Append(chip);
+        }
+        return frame;
     }
 
     TextBlock SnippetBlock(std::wstring const& snippet) {
@@ -773,8 +862,38 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void Open(int64_t id) {
-        if (auto row = Row(id); row && !sessions::OpenSession(*row))
-            ShowProblem(L"Could not open that session in " + std::wstring(sessions::ToolName(row->tool)));
+        auto row = Row(id);
+        if (!row) return;
+        if (row->tool == Tool::ClaudeDesktop) {
+            // Claude can only open sessions of the organization it is showing;
+            // otherwise its link quietly starts a new session.
+            std::string active;
+            try { active = index->MetaValue("claude_desktop_account"); } catch (...) {}
+            if (!active.empty() && active != row->account) {
+                ConfirmOtherOrganization(id, AccountName(row->account), AccountName(active));
+                return;
+            }
+        }
+        if (!sessions::OpenSession(*row)) ShowProblem(L"Could not open that session in " + std::wstring(sessions::ToolName(row->tool)));
+    }
+
+    fire_and_forget ConfirmOtherOrganization(int64_t id, std::wstring target, std::wstring active) {
+        auto lifetime = get_strong();
+        ContentDialog dialog;
+        dialog.XamlRoot(shell.XamlRoot());
+        dialog.Title(box_value(L"Switch Claude to " + target));
+        TextBlock text;
+        text.TextWrapping(TextWrapping::Wrap);
+        text.Text(L"This session belongs to " + target + L". Claude seems to be showing " + active +
+                  L", and it can only open sessions of the organization it is showing. Switch organizations in Claude "
+                  L"(your name in the lower left), then open the session.");
+        dialog.Content(text);
+        dialog.PrimaryButtonText(L"Open Claude");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Primary);
+        auto result = co_await dialog.ShowAsync();
+        if (result != ContentDialogResult::Primary || closing) co_return;
+        if (auto row = Row(id)) sessions::OpenSession(*row);
     }
 
     int64_t MenuTarget() {

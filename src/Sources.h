@@ -66,15 +66,31 @@ struct AppEntry {
     std::string title;
     std::string account;
     std::string appId;    // Claude desktop "local_..." id
+    std::string folder;   // the folder the app files the session under (Claude desktop: originCwd)
+    std::string project;  // the Codex project the thread belongs to, as named in its sidebar
     bool archived = false;
+};
+
+// A Codex project: its display name and the folders it covers.
+struct CodexProject {
+    std::string name;
+    std::wstring root;
 };
 
 struct AppMetadata {
     std::unordered_map<std::string, AppEntry> claude;  // by Claude session id
     std::unordered_map<std::string, AppEntry> codex;   // by Codex thread id
     std::string claudeCliAccount;                      // organization signed in to the command line
+    // The Claude desktop app opens only sessions of the organization it is
+    // showing. Best guess: the organization of the most recently focused session.
+    std::string claudeDesktopAccount;
     std::unordered_map<std::string, std::string> accountNames;  // suggested names for new accounts
+    std::vector<CodexProject> codexProjects;
 };
+
+// The short folder name a card shows: a Codex project name when the folder
+// belongs to one, otherwise the last part of the path. Empty for scratch folders.
+std::string FolderLabel(std::string const& cwd, std::vector<CodexProject> const& projects);
 
 AppMetadata ReadAppMetadata(SourceRoots const& roots);
 

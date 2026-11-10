@@ -155,6 +155,8 @@ bool IsInjectedContext(std::string_view text) {
         "# AGENTS.md instructions", "<INSTRUCTIONS>", "<artifact-content", "<user-prompt-submit-hook>", "<bash-"};
     for (auto prefix : prefixes)
         if (text.substr(0, prefix.size()) == prefix) return true;
+    // Answers to an app's question forms arrive as JSON, not as typed words.
+    if (text.substr(0, 3) == "[{\"" || text.substr(0, 2) == "{\"") return true;
     return text.empty();
 }
 

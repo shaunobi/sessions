@@ -18,6 +18,7 @@ struct SessionRow {
     std::wstring title;
     std::string account;
     std::wstring cwd;
+    std::wstring folder;        // short name: Codex project or last part of the path
     std::wstring externalId;
     std::wstring appId;
     std::wstring path;
@@ -99,6 +100,9 @@ public:
     std::wstring Snippet(std::wstring const& query, int64_t message);
 
     void RenameAccount(std::string const& account, std::wstring const& name);
+    std::string MetaValue(std::string const& key);
+    void SetMetaValue(std::string const& key, std::string const& value);
+    std::wstring AccountName(std::string const& account);
     void AddTag(std::string const& key, std::wstring const& tag);
     void RemoveTag(std::string const& key, std::wstring const& tag);
 

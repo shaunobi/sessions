@@ -37,9 +37,14 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
 
     auto roots = SourceRoots::Detect();
     bool changed = false;
-    if (request.forgetAll || !request.forgetAccounts.empty()) {
+    // When the way transcripts are read changes, re-read everything. Meaning
+    // vectors are kept by content, so unchanged text is not embedded again.
+    constexpr char const* ParserVersion = "2";
+    const bool reparse = index.MetaValue("parser_version") != ParserVersion;
+    if (request.forgetAll || reparse || !request.forgetAccounts.empty()) {
         Transaction transaction(index.Database());
-        if (request.forgetAll) index.ForgetAll();
+        if (request.forgetAll || reparse) index.ForgetAll();
+        index.SetMetaValue("parser_version", ParserVersion);
         for (auto const& account : request.forgetAccounts) index.ForgetAccount(account);
         transaction.Commit();
         changed = true;

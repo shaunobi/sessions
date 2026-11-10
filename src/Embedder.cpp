@@ -1,4 +1,6 @@
 #include "Embedder.h"
+#include "Embedded.h"
+#include "ResourceIds.h"
 #include "Text.h"
 #include <onnxruntime_cxx_api.h>
 #include <dml_provider_factory.h>
@@ -18,8 +20,6 @@ struct Embedder::Runtime {
 };
 
 Embedder::~Embedder() = default;
-
-fs::path Embedder::ModelFolder() { return ExecutableFolder() / L"models"; }
 
 std::shared_ptr<Embedder> Embedder::Shared(std::wstring* problem) {
     static std::mutex mutex;
@@ -43,15 +43,14 @@ std::shared_ptr<Embedder> Embedder::Shared(std::wstring* problem) {
 }
 
 bool Embedder::Load(std::wstring& problem) {
-    auto folder = ModelFolder();
-    auto model = folder / (Wide(EmbeddingModelName) + L".onnx");
-    auto vocab = folder / (Wide(EmbeddingModelName) + L".vocab.txt");
-    std::error_code error;
-    if (!fs::exists(model, error) || !fs::exists(vocab, error)) {
-        problem = L"Meaning search is off: the model is not in " + folder.wstring();
+    // The model and vocabulary are embedded in the executable.
+    auto model = EmbeddedFile(IDR_MODEL);
+    auto vocab = EmbeddedFile(IDR_VOCAB);
+    if (model.empty() || vocab.empty()) {
+        problem = L"Meaning search is off: this build has no embedding model";
         return false;
     }
-    if (!tokenizer.Load(vocab)) {
+    if (!tokenizer.LoadText(vocab)) {
         problem = L"Meaning search is off: the vocabulary could not be read";
         return false;
     }
@@ -71,7 +70,7 @@ bool Embedder::Load(std::wstring& problem) {
             // Leave cores for everything else on the machine.
             options.SetIntraOpNumThreads(4);
         }
-        runtime->session = Ort::Session(runtime->env, model.c_str(), options);
+        runtime->session = Ort::Session(runtime->env, model.data(), model.size(), options);
     };
     try {
         open(true);

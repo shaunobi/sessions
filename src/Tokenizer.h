@@ -19,6 +19,8 @@ struct Token {
 class Tokenizer {
 public:
     bool Load(std::filesystem::path const& vocabFile);
+    // One token per line, as in vocab.txt.
+    bool LoadText(std::string_view text);
     bool Loaded() const { return !vocab.empty(); }
     // Word pieces without [CLS]/[SEP]; stops after `limit` tokens.
     std::vector<Token> Encode(std::string_view utf8, size_t limit = SIZE_MAX) const;

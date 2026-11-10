@@ -141,6 +141,13 @@ CREATE TABLE IF NOT EXISTS tags(
   tag TEXT NOT NULL,
   PRIMARY KEY(session_key, tag));
 )sql");
+    // Columns added after the first version.
+    bool hasFolder = false;
+    {
+        auto columns = db.Prepare("PRAGMA table_info(sessions)");
+        while (columns.Step()) hasFolder = hasFolder || columns.Text(1) == "folder";
+    }
+    if (!hasFolder) db.Exec("ALTER TABLE sessions ADD COLUMN folder TEXT NOT NULL DEFAULT ''");
     auto set = db.Prepare("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?1)");
     set.Bind(1, int64_t(SchemaVersion)).Run();
 }
@@ -204,14 +211,16 @@ void Index::ApplyMetadata(AppMetadata const& meta) {
         Family family;
         std::string external, accountFile;
         Tool toolFile;
+        std::string cwd;
     };
     std::vector<Row> rows;
     {
-        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file FROM sessions WHERE skipped = ''");
+        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file, cwd FROM sessions WHERE skipped = ''");
         while (query.Step())
-            rows.push_back({query.Int(0), Family(query.Int(1)), std::string(query.Text(2)), std::string(query.Text(3)), Tool(query.Int(4))});
+            rows.push_back({query.Int(0), Family(query.Int(1)), std::string(query.Text(2)), std::string(query.Text(3)), Tool(query.Int(4)),
+                            std::string(query.Text(5))});
     }
-    auto update = db.Prepare("UPDATE sessions SET tool = ?2, account = ?3, title_app = ?4, app_id = ?5, archived = ?6 WHERE id = ?1");
+    auto update = db.Prepare("UPDATE sessions SET tool = ?2, account = ?3, title_app = ?4, app_id = ?5, archived = ?6, folder = ?7 WHERE id = ?1");
     auto account = db.Prepare("INSERT OR IGNORE INTO accounts(id, family) VALUES(?1, ?2)");
     std::unordered_set<std::string> accounts;
     for (auto const& row : rows) {
@@ -236,10 +245,15 @@ void Index::ApplyMetadata(AppMetadata const& meta) {
             .Bind(3, owner)
             .Bind(4, app ? std::string_view(app->title) : std::string_view())
             .Bind(5, app ? std::string_view(app->appId) : std::string_view())
-            .Bind(6, int64_t(app && app->archived));
+            .Bind(6, int64_t(app && app->archived))
+            .Bind(7, app && !app->project.empty() ? app->project
+                     : FolderLabel(app && !app->folder.empty() ? app->folder : row.cwd,
+                                   row.family == Family::Codex ? meta.codexProjects : std::vector<CodexProject>{}));
         update.Run();
         if (accounts.insert(owner).second) account.Bind(1, owner).Bind(2, int64_t(row.family)).Run();
     }
+    auto active = db.Prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('claude_desktop_account', ?1)");
+    active.Bind(1, meta.claudeDesktopAccount).Run();
     auto suggest = db.Prepare("UPDATE accounts SET suggested = ?2 WHERE id = ?1");
     for (auto const& [id, name] : meta.accountNames) suggest.Bind(1, id).Bind(2, name).Run();
 }
@@ -266,7 +280,7 @@ std::vector<SessionRow> Index::LoadSessions() {
     std::vector<SessionRow> out;
     auto query = db.Prepare(R"sql(
 SELECT id, key, tool, COALESCE(NULLIF(title_app, ''), NULLIF(title_file, ''), first_prompt), account, cwd, external_id,
-  app_id, path, created, last_activity, message_count, archived
+  app_id, path, created, last_activity, message_count, archived, folder
 FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
     while (query.Step()) {
         SessionRow row;
@@ -283,6 +297,7 @@ FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
         row.lastActivity = query.Int(10);
         row.messages = int(query.Int(11));
         row.archived = query.Int(12) != 0;
+        row.folder = query.WText(13);
         if (auto it = tags.find(row.key); it != tags.end()) row.tags = it->second;
         if (row.title.empty()) row.title = L"Untitled session";
         out.push_back(std::move(row));
@@ -505,6 +520,23 @@ std::wstring Index::Passage(int64_t message, int32_t offset, size_t bytes) {
     size_t start = std::min<size_t>(size_t(std::max(offset, 0)), text.size());
     std::string piece = Clip(text.substr(start), bytes);
     return (start > 0 ? L"…" : L"") + Wide(Squash(piece));
+}
+
+std::string Index::MetaValue(std::string const& key) {
+    auto q = db.Prepare("SELECT value FROM meta WHERE key = ?1");
+    q.Bind(1, key);
+    return q.Step() ? std::string(q.Text(0)) : std::string();
+}
+
+void Index::SetMetaValue(std::string const& key, std::string const& value) {
+    auto q = db.Prepare("INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)");
+    q.Bind(1, key).Bind(2, value).Run();
+}
+
+std::wstring Index::AccountName(std::string const& account) {
+    for (auto const& row : Accounts())
+        if (row.id == account) return row.name;
+    return DefaultAccountName(account);
 }
 
 void Index::RenameAccount(std::string const& account, std::wstring const& name) {

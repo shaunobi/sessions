@@ -26,3 +26,6 @@ build/
 # The embedding model is downloaded by build.ps1, never committed.
 *.onnx
 models/
+
+# Tool logos belong to their companies: extracted locally by tools/ExtractLogos.ps1.
+assets/logos/

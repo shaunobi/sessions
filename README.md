@@ -12,7 +12,13 @@ Install Visual Studio 2022 with **Desktop development with C++** and Windows SDK
 .\install.ps1    # copies it to D:\Apps\Sessions and adds Start menu and desktop shortcuts
 ```
 
-C: is nearly full, so packages and build output go to **`D:\Build\Sessions`** (override with `-BuildRoot` or `SESSIONS_BUILD_ROOT`). The installed folder is **`D:\Apps\Sessions`**: the executable, the Windows App SDK runtime files beside it, and one database, `Sessions.db`. Installing again keeps the database.
+C: is nearly full, so packages and build output go to **`D:\Build\Sessions`** (override with `-BuildRoot` or `SESSIONS_BUILD_ROOT`). The installed folder **`D:\Apps\Sessions`** holds three files:
+
+- `Sessions.exe` (about 135 MB). The embedding model, its vocabulary, the app image and the tool logos are compiled into it as resources.
+- `Microsoft.WindowsAppRuntime.Bootstrap.dll`, the small loader that finds the Windows App Runtime. WinUI and Windows Machine Learning (ONNX Runtime, DirectML) come from that runtime, which is installed in Windows (2.5 or later), rather than being copied beside the app. Unlike CardFX, the build is framework-dependent, so there are no runtime DLLs in the folder.
+- `Sessions.db`, the index. While the app is open, SQLite keeps `Sessions.db-wal` and `Sessions.db-shm` beside it, and they go away when it closes.
+
+Installing again mirrors the build into the folder: leftovers from older builds are removed and the database is kept.
 
 ## Sources
 
@@ -46,14 +52,22 @@ The two rankings are merged by reciprocal rank fusion. Short queries (one or two
 
 ### Meaning search details
 
-- Model: **BGE small English v1.5** (BAAI, MIT licence, 384 dimensions, 133 MB), downloaded by `build.ps1` from Hugging Face at a pinned revision into `D:\Build\Sessions\models` and installed to `models\` beside the executable. It is not stored in the repository. Without it, meaning search is simply off.
+- Model: **BGE small English v1.5** (BAAI, MIT licence, 384 dimensions, 133 MB). `build.ps1` downloads it from Hugging Face at a pinned revision into `D:\Build\Sessions\models`, and it is compiled into the executable. It is not stored in the repository.
 - Runtime: ONNX Runtime from **Windows Machine Learning** (`Microsoft.Windows.AI.MachineLearning`), on the GPU through DirectML, falling back to the CPU. The tokenizer (BERT WordPiece, uncased) is written in-house in `src/Tokenizer.cpp`.
 - Messages are split into pieces of up to 254 tokens (at most eight per message). Each piece's vector is stored once in the database, keyed by a hash of its tokens, as 384 signed bytes; re-reading a live session only embeds the new pieces. Vectors are searched in memory by brute force, which takes a few milliseconds at this size, so the SQLite vector add-on was not needed.
 - On this PC (RTX 3070) the first pass over all ~20,500 messages takes about 80 seconds after keyword indexing, and the status shows "Learning meaning" with progress. A search, including embedding the query, takes 15–200 ms. The database grows from about 20 MB to about 33 MB.
 
+## Cards
+
+Each card shows the tool's own logo, the session's name as its app shows it, its folder, when it was last active and how many messages it has. Command-line sessions carry a small `>_` terminal chip on the logo; Claude Code's command line has its own dark logo as well. The account appears in the logo's tooltip and in the Account filter.
+
+- **Names**: the Claude desktop sidebar title; for Codex, the sidebar name from `~\.codex\session_index.jsonl` (generated or renamed), then the thread's name in `state_5.sqlite`. Codex's `threads.title` is usually just the first prompt, so it is used only when nothing else exists.
+- **Folders**: for Codex, the project the thread belongs to (`threads.project_id`), otherwise the first project in sidebar order whose folder contains the session's folder (`projects` and `project_roots` in `state_5.sqlite`). For example, `D:\ownCloud\Management` shows as **sembit**. Otherwise the last part of the session's folder; Claude desktop sessions use the folder they were started in (`originCwd`). Scratch sessions show no folder.
+- **Logos** belong to their companies, so they are not committed. `tools\ExtractLogos.ps1` copies them at the highest resolution installed (ChatGPT's white knot from the Codex app, the Claude app tile up to 1240 px, Claude Code's own icon, Antigravity's icon) into `assets\logos`, and `build.ps1` runs it when they are missing.
+
 ## Opening sessions
 
-- **Claude desktop**: `claude://code/continue?session=<local id>`. The app recognizes the link; whether it jumps straight to the session is still to be confirmed. At worst Claude comes to the front.
+- **Claude desktop**: `claude://code/continue?session=<local id>`. Claude looks the id up only among the non-archived sessions of the organization it is currently showing; if the session is not there, it quietly opens a new session instead. Sessions therefore guesses which organization Claude is showing (the one whose session was focused most recently) and, for a session in the other organization, asks you to switch organizations in Claude first.
 - **Codex desktop**: `codex://threads/<thread id>`.
 - **Claude CLI / Codex CLI**: a Windows Terminal tab in the session's folder running `claude --resume <id>` or `codex resume <id>`.
 

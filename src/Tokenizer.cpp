@@ -1,6 +1,7 @@
 #include "Tokenizer.h"
 #include <windows.h>
 #include <fstream>
+#include <iterator>
 
 namespace sessions {
 
@@ -94,12 +95,20 @@ void Fold(char32_t c, std::u32string& out) {
 bool Tokenizer::Load(std::filesystem::path const& vocabFile) {
     std::ifstream file(vocabFile, std::ios::binary);
     if (!file) return false;
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return LoadText(text);
+}
+
+bool Tokenizer::LoadText(std::string_view text) {
     vocab.clear();
-    std::string line;
     int32_t id = 0;
-    while (std::getline(file, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        vocab.emplace(line, id++);
+    while (!text.empty()) {
+        size_t end = text.find('\n');
+        std::string_view line = text.substr(0, end);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        vocab.emplace(std::string(line), id++);
+        if (end == std::string_view::npos) break;
+        text.remove_prefix(end + 1);
     }
     auto find = [&](char const* token, int32_t fallback) {
         auto it = vocab.find(token);

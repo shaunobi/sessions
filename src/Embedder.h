@@ -20,11 +20,10 @@ class Embedder {
 public:
     ~Embedder();
 
-    // Loads models\bge-small-en-v1.5.onnx and its vocabulary from beside the
-    // executable. Returns nullptr (with a reason) when unavailable. Shared by
-    // the indexer and the search thread; loaded once.
+    // Loads the model and vocabulary embedded in the executable. Returns
+    // nullptr (with a reason) when unavailable. Shared by the indexer and the
+    // search thread; loaded once.
     static std::shared_ptr<Embedder> Shared(std::wstring* problem = nullptr);
-    static std::filesystem::path ModelFolder();
 
     Tokenizer const& Tokens() const { return tokenizer; }
     std::wstring const& Device() const { return device; }
