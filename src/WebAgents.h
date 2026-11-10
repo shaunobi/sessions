@@ -115,8 +115,9 @@ constexpr wchar_t ChatGpt[] = LR"JS(
       const check = await getJson('/backend-api/accounts/check/v4-2023-04-27', { headers: auth });
       for (const [key, value] of Object.entries(check.accounts || {})) {
         const a = (value && value.account) || {};
-        const id = a.account_id || key;
-        if (id && id !== 'default') accounts.push({ id, name: a.name || (a.structure === 'personal' ? 'Personal' : '') });
+        const id = a.account_id || (key === 'default' ? '' : key);
+        // The personal account may have no id of its own; it is then read without the account header.
+        if (!accounts.some((x) => x.id === id)) accounts.push({ id, name: a.name || (a.structure === 'personal' ? 'Personal' : '') });
       }
     } catch (e) { if (e.signedOut) throw e; }
     if (!accounts.length) accounts.push({ id: '', name: '' });
