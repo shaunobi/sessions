@@ -98,4 +98,34 @@ Sizes: Claude Code ~1 GB of transcripts (180 top-level sessions plus subagents);
 
 ## Open questions
 
-1. Antigravity desktop protobuf schema: map the message fields (user text, model text, tool calls, timestamps) from decrypted samples before building the reader.
+(none; Antigravity desktop field map recorded below)
+
+## Antigravity desktop: conversation field map (2026-11-10)
+
+Mapped from all 11 decrypted conversations on this PC (1,512 steps). Field numbers are protobuf field numbers; the official schema is not public, so these are observed, not documented.
+
+Top-level message (one per `.pb` file):
+- `1` string: conversation id (matches the file name).
+- `2` repeated message: **steps**, in order.
+
+Each step:
+- `1` varint: **step type**. The step's payload sits in one field whose number depends on the type.
+- `4` varint: step status.
+- `5` message: step metadata. `5.1` is a standard Timestamp (`5.1.1` seconds since 1970, `5.1.2` nanoseconds): **use this for message times**; first and last step give created and last-activity dates.
+
+Step types to index:
+
+| Step type | Payload field | Meaning | Text to index |
+|---|---|---|---|
+| 14 | `19` | User message | `19.2` (the user's text) |
+| 15 | `20` | AI response | `20.1` (reply text; present when the AI wrote prose, 213 of 495). `20.8` is the same reply with `cci:` file links: prefer `20.1`. |
+| 23 | `30` | Conversation checkpoint summary | `30.4` / `30.5` (summary prose; useful for semantic search) |
+
+Fields to skip (tool activity, per the "only what you and the AI said" rule):
+- `20.3` model thinking, `20.7` tool calls, `20.6` bot id.
+- Step type 5 (`10`, file views), 8 (`14`, file contents), 21 (`28`, terminal commands and output), 90 (`103`), 81 to 85, 98, 100 and the rest: tool or system steps.
+- Step field `31`: error details on failed steps.
+
+Message count for a card = number of type 14 steps plus type 15 steps that have `20.1`.
+
+Titles still come from `state.vscdb` (`antigravityUnifiedStateSync.trajectorySummaries`), since the conversation file has no title field.
