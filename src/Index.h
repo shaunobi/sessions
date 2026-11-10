@@ -42,6 +42,19 @@ struct SearchHit {
     int64_t bestMessage = 0;    // message to show a snippet from
 };
 
+// One embedded piece of a message, kept in memory for meaning search.
+struct ChunkVector {
+    int64_t session = 0;
+    int64_t message = 0;
+    int32_t offset = 0;           // byte offset of the piece in the message text
+    std::vector<int8_t> vector;   // L2-normalized, scaled by 127
+};
+
+struct PendingMessage {
+    int64_t id = 0;
+    std::string text;
+};
+
 struct KnownFile {
     int64_t size = 0;
     int64_t modified = 0;
@@ -60,6 +73,21 @@ public:
     void ForgetAccount(std::string const& account);
     void ForgetAll();
     Db& Database() { return db; }
+
+    // Meaning search storage. Pieces are keyed by a hash of their tokens, so
+    // re-reading a live session only embeds what is new.
+    void UseEmbeddingModel(std::string const& name);
+    int PendingEmbeddingCount();
+    std::vector<PendingMessage> MessagesToEmbed(int limit);
+    bool HasEmbedding(int64_t hash);
+    void StoreEmbedding(int64_t hash, std::vector<float> const& vector);
+    void StoreChunk(int64_t message, int chunk, int32_t offset, int64_t hash);
+    void PruneEmbeddings();
+    int64_t VectorsVersion();
+    void BumpVectorsVersion();
+    std::vector<ChunkVector> LoadVectors();
+    // About `bytes` of a message's text starting at a piece's offset.
+    std::wstring Passage(int64_t message, int32_t offset, size_t bytes = 320);
 
     // Reader side.
     std::vector<SessionRow> LoadSessions();

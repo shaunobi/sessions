@@ -22,3 +22,7 @@ build/
 # Screenshots from tests/Capture-Window.ps1 show private session titles.
 *.png
 !assets/Sessions.png
+
+# The embedding model is downloaded by build.ps1, never committed.
+*.onnx
+models/

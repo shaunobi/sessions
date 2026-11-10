@@ -12,6 +12,18 @@ if (!$vs) { throw 'Install Visual Studio 2022 with Desktop development with C++ 
 $packages = Join-Path $BuildRoot 'packages'
 $nuget = Join-Path $BuildRoot 'tools\nuget.exe'
 if (!(Test-Path $nuget)) { New-Item -ItemType Directory -Force (Split-Path $nuget) | Out-Null; Invoke-WebRequest 'https://dist.nuget.org/win-x86-commandline/v6.14.0/nuget.exe' -OutFile $nuget }
+# Embedding model for meaning search: BGE small English v1.5 (MIT licence), pinned to one revision.
+$models = Join-Path $BuildRoot 'models'
+New-Item -ItemType Directory -Force $models | Out-Null
+$revision = '5c38ec7c405ec4b44b94cc5a9bb96e735b38267a'
+$modelFiles = @{
+    'bge-small-en-v1.5.onnx'      = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/$revision/onnx/model.onnx"
+    'bge-small-en-v1.5.vocab.txt' = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/$revision/vocab.txt"
+}
+foreach ($name in $modelFiles.Keys) {
+    $target = Join-Path $models $name
+    if (!(Test-Path $target)) { Invoke-WebRequest $modelFiles[$name] -OutFile $target }
+}
 & $nuget restore packages.config -PackagesDirectory $packages -Source 'https://api.nuget.org/v3/index.json' -NonInteractive
 if ($LASTEXITCODE) { throw 'Package restore failed.' }
 & (Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe') Sessions.vcxproj /m /v:minimal /p:Configuration=$Configuration /p:Platform=x64 "/p:SessionsBuildRoot=$BuildRoot"

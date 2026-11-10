@@ -30,7 +30,9 @@
 #include "AppTheme.h"
 #include "Index.h"
 #include "Indexer.h"
+#include "Embedder.h"
 #include "Launch.h"
+#include "Search.h"
 #include "Text.h"
 
 using namespace winrt;
@@ -117,11 +119,7 @@ ToolLook LookOf(Tool tool) {
     return {Rgb(0x60, 0x60, 0x60), L""};
 }
 
-struct Found {
-    int64_t session = 0;
-    double score = 0;
-    std::wstring snippet;
-};
+using sessions::Found;
 
 // Runs searches on its own thread and database connection so typing never waits
 // on the index. Only the latest query's results are delivered.
@@ -159,7 +157,7 @@ private:
     uint64_t generation = 0;
 
     void Run() {
-        std::unique_ptr<sessions::Index> index;
+        std::unique_ptr<sessions::HybridSearch> search;
         for (;;) {
             std::wstring query;
             uint64_t ticket{};
@@ -173,13 +171,8 @@ private:
             }
             std::vector<Found> results;
             try {
-                if (!index) index = std::make_unique<sessions::Index>(file);
-                auto hits = index->Search(query);
-                for (size_t i = 0; i < hits.size(); ++i) {
-                    Found found{hits[i].session, hits[i].score, {}};
-                    if (i < 300) found.snippet = index->Snippet(query, hits[i].bestMessage);
-                    results.push_back(std::move(found));
-                }
+                if (!search) search = std::make_unique<sessions::HybridSearch>(file);
+                results = search->Run(query);
             } catch (...) {
             }
             deliver(ticket, query, std::move(results));
@@ -306,7 +299,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     };
     std::unordered_map<int64_t, CardCache> cardCache;
     std::vector<int64_t> shown;
-    bool closing = false, populatingFilters = false;
+    bool closing = false, populatingFilters = false, sortChosen = false;
     int lastTotal = 0;
 
     App() {
@@ -375,8 +368,13 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         toolFilter.SelectedIndex(0);
         for (auto label : {L"Last activity", L"Best match", L"Created", L"Most messages"}) sortBox.Items().Append(box_value(label));
         sortBox.SelectedIndex(0);
-        for (auto combo : {toolFilter, accountFilter, tagFilter, sortBox})
+        for (auto combo : {toolFilter, accountFilter, tagFilter})
             combo.SelectionChanged([this](auto&&, auto&&) { if (!populatingFilters) Render(); });
+        sortBox.SelectionChanged([this](auto&&, auto&&) {
+            if (populatingFilters) return;
+            sortChosen = true;
+            Render();
+        });
 
         searchDelay = window.DispatcherQueue().CreateTimer();
         searchDelay.Interval(std::chrono::milliseconds(180));
@@ -512,6 +510,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             activeQuery.clear();
             searching = false;
             found.clear();
+            SetSort(0);
             Render();
             return;
         }
@@ -527,7 +526,17 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         activeQuery = query;
         found.clear();
         for (auto& result : results) found[result.session] = std::move(result);
+        SetSort(1);
         Render();
+    }
+
+    // Searching sorts by best match and clearing returns to last activity,
+    // unless the person chose a sort themselves.
+    void SetSort(int choice) {
+        if (sortChosen || sortBox.SelectedIndex() == choice) return;
+        populatingFilters = true;
+        sortBox.SelectedIndex(choice);
+        populatingFilters = false;
     }
 
     // ---- Cards ------------------------------------------------------------
@@ -567,8 +576,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             elements.push_back(CardFor(*visible[i]));
         }
         if (ids != shown) {
+            // A new search or filter starts at the top; a live update keeps its place.
+            bool newList = shown.empty() || ids.empty() || ids.front() != shown.front();
             items.ReplaceAll(elements);
             shown = std::move(ids);
+            if (newList && items.Size() > 0) cards.ScrollIntoView(items.GetAt(0));
         }
 
         std::wstring count;
@@ -592,7 +604,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     IInspectable CardFor(sessions::SessionRow const& row) {
         std::wstring snippet;
         if (!activeQuery.empty())
-            if (auto it = found.find(row.id); it != found.end()) snippet = it->second.snippet;
+            if (auto it = found.find(row.id); it != found.end())
+                snippet = (it->second.byMeaning ? L"\x03" : L"") + it->second.snippet;
         std::wstring signature = row.title + L"\x1F" + AccountName(row.account) + L"\x1F" + std::to_wstring(row.messages) + L"\x1F" +
                                  std::to_wstring(row.lastActivity) + L"\x1F" + std::to_wstring(int(row.tool)) + L"\x1F" + snippet +
                                  (row.archived ? L"\x1F" L"a" : L"");
@@ -732,6 +745,15 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             run.clear();
         };
         for (wchar_t c : snippet) {
+            if (c == L'\x03') {
+                // Found by meaning rather than by the words typed.
+                Documents::Run label;
+                label.Text(L"\u2248 similar meaning  ");
+                label.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+                label.Foreground(ThemeBrush(L"AccentTextFillColorPrimaryBrush"));
+                block.Inlines().Append(label);
+                continue;
+            }
             if (c == L'\x01' || c == L'\x02') {
                 flush();
                 highlight = c == L'\x01';
@@ -983,14 +1005,19 @@ int RunHeadless(int argc, wchar_t** argv) {
         auto totals = index.Count();
         print(L"sessions " + std::to_wstring(totals.sessions) + L", skipped " + std::to_wstring(totals.skipped) + L", messages " +
               std::to_wstring(totals.messages));
+        std::wstring problem;
+        auto embedder = sessions::Embedder::Shared(&problem);
+        print(embedder ? L"meaning search on " + embedder->Device() : problem);
+        sessions::HybridSearch hybrid(database);
         for (auto const& query : queries) {
             auto started = sessions::NowMs();
-            auto hits = index.Search(query);
-            print(L"search “" + query + L"”: " + std::to_wstring(hits.size()) + L" sessions in " +
+            auto hits = hybrid.Run(query, 8);
+            print(L"search \u201C" + query + L"\u201D: " + std::to_wstring(hits.size()) + L" sessions in " +
                   std::to_wstring(sessions::NowMs() - started) + L" ms");
-            for (size_t i = 0; i < hits.size() && i < 5; ++i) {
+            for (size_t i = 0; i < hits.size() && i < 8; ++i) {
                 auto row = byId[hits[i].session];
-                auto snippet = index.Snippet(query, hits[i].bestMessage);
+                auto snippet = (hits[i].byMeaning ? L"[meaning " + std::to_wstring(int(hits[i].similarity * 100)) + L"] " : std::wstring()) +
+                               hits[i].snippet;
                 std::replace(snippet.begin(), snippet.end(), L'\x01', L'[');
                 std::replace(snippet.begin(), snippet.end(), L'\x02', L']');
                 std::replace(snippet.begin(), snippet.end(), L'\n', L' ');

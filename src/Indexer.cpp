@@ -1,4 +1,5 @@
 #include "Indexer.h"
+#include "Embedder.h"
 #include "Index.h"
 #include "Sources.h"
 #include "Text.h"
@@ -174,6 +175,112 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
     return status;
 }
 
+uint64_t HashTokens(std::vector<int32_t> const& ids) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (int32_t id : ids) {
+        for (int k = 0; k < 4; ++k) {
+            hash ^= uint8_t(uint32_t(id) >> (8 * k));
+            hash *= 1099511628211ULL;
+        }
+    }
+    return hash ? hash : 1;  // 0 marks "nothing to embed"
+}
+
+// Embeds messages that have no vectors yet, newest sessions first. Stops early
+// for shutdown or when a rescan is requested (the request is left signaled).
+void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, HANDLE request) {
+    std::wstring problem;
+    auto embedder = Embedder::Shared(&problem);
+    if (!embedder) return;
+    {
+        Transaction transaction(index.Database());
+        index.UseEmbeddingModel(EmbeddingModelName);
+        transaction.Commit();
+    }
+    const int pending = index.PendingEmbeddingCount();
+    if (pending == 0) return;
+
+    IndexStatus status;
+    status.state = IndexStatus::State::Indexing;
+    status.total = pending;
+    auto lastReport = Clock::now() - std::chrono::seconds(1);
+    constexpr size_t maxChunksPerMessage = 8;
+    constexpr size_t batchSize = 32;
+    for (;;) {
+        if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;
+        if (WaitForSingleObject(request, 0) == WAIT_OBJECT_0) {
+            SetEvent(request);
+            return;
+        }
+        auto messages = index.MessagesToEmbed(256);
+        if (messages.empty()) break;
+
+        struct Piece {
+            int64_t message;
+            int chunk;
+            int32_t offset;
+            int64_t hash;
+        };
+        std::vector<Piece> pieces;
+        std::vector<std::vector<int32_t>> toEmbed;
+        std::vector<int64_t> toEmbedHash;
+        std::unordered_set<int64_t> queued;
+        for (auto const& message : messages) {
+            auto tokens = embedder->Tokens().Encode(message.text, ChunkTokens * maxChunksPerMessage);
+            if (tokens.empty()) {
+                pieces.push_back({message.id, 0, 0, 0});
+                continue;
+            }
+            for (size_t start = 0, chunk = 0; start < tokens.size(); start += ChunkTokens, ++chunk) {
+                std::vector<int32_t> ids;
+                for (size_t k = start; k < std::min(tokens.size(), start + ChunkTokens); ++k) ids.push_back(tokens[k].id);
+                int64_t hash = int64_t(HashTokens(ids));
+                pieces.push_back({message.id, int(chunk), int32_t(tokens[start].offset), hash});
+                if (queued.insert(hash).second && !index.HasEmbedding(hash)) {
+                    toEmbed.push_back(std::move(ids));
+                    toEmbedHash.push_back(hash);
+                }
+            }
+        }
+
+        // Similar lengths batch together with less padding.
+        std::vector<size_t> order(toEmbed.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return toEmbed[a].size() < toEmbed[b].size(); });
+        std::vector<std::pair<int64_t, std::vector<float>>> vectors;
+        for (size_t start = 0; start < order.size(); start += batchSize) {
+            if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;
+            std::vector<std::vector<int32_t>> batch;
+            for (size_t k = start; k < std::min(order.size(), start + batchSize); ++k) batch.push_back(toEmbed[order[k]]);
+            auto results = embedder->Embed(batch);
+            for (size_t k = 0; k < results.size(); ++k) vectors.emplace_back(toEmbedHash[order[start + k]], std::move(results[k]));
+        }
+
+        Transaction transaction(index.Database());
+        for (auto const& [hash, vector] : vectors) index.StoreEmbedding(hash, vector);
+        for (auto const& piece : pieces) index.StoreChunk(piece.message, piece.chunk, piece.offset, piece.hash);
+        index.BumpVectorsVersion();
+        transaction.Commit();
+
+        status.done = std::min(status.total, status.done + int(messages.size()));
+        if (Clock::now() - lastReport > std::chrono::milliseconds(250)) {
+            status.message = L"Learning meaning \u00B7 " + std::to_wstring(status.done) + L" of " + std::to_wstring(status.total) +
+                             L" messages";
+            callback(status);
+            lastReport = Clock::now();
+        }
+    }
+    {
+        Transaction transaction(index.Database());
+        index.PruneEmbeddings();
+        transaction.Commit();
+    }
+    auto totals = index.Count();
+    status.state = IndexStatus::State::Ready;
+    status.message = L"Up to date \u00B7 " + Plural(totals.sessions, L"session", L"sessions");
+    callback(status);
+}
+
 }  // namespace
 
 Indexer::Indexer(fs::path db, Callback cb) : database(std::move(db)), callback(std::move(cb)) {
@@ -226,6 +333,7 @@ void Indexer::Run() {
             }
             try {
                 Scan(index, request, callback, stopEvent);
+                EmbedPending(index, callback, stopEvent, requestEvent);
             } catch (std::exception const& e) {
                 IndexStatus failed;
                 failed.state = IndexStatus::State::Failed;
@@ -233,14 +341,13 @@ void Indexer::Run() {
                 callback(failed);
             }
         };
-        scan();
-
         std::vector<HANDLE> changes;
         for (auto const& root : SourceRoots::Detect().Watched()) {
             HANDLE change = FindFirstChangeNotificationW(root.c_str(), TRUE,
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
             if (change != INVALID_HANDLE_VALUE) changes.push_back(change);
         }
+        scan();
         std::vector<HANDLE> handles{stopEvent, requestEvent};
         handles.insert(handles.end(), changes.begin(), changes.end());
 
@@ -278,11 +385,18 @@ void Indexer::Run() {
     }
 }
 
-IndexStatus Indexer::RunOnce(fs::path const& database, Callback const& callback) {
+IndexStatus Indexer::RunOnce(fs::path const& database, Callback const& callback, bool embed) {
     Index index(database);
     HANDLE never = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE noRequest = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     auto status = Scan(index, {}, callback, never);
+    if (embed) {
+        IndexStatus last = status;
+        EmbedPending(index, [&](IndexStatus const& s) { last = s; callback(s); }, never, noRequest);
+        status = last;
+    }
     CloseHandle(never);
+    CloseHandle(noRequest);
     return status;
 }
 

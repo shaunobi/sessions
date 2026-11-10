@@ -29,6 +29,7 @@ public:
     Statement& Bind(int index, int64_t value);
     Statement& Bind(int index, std::string_view utf8);
     Statement& BindNull(int index);
+    Statement& BindBlob(int index, void const* data, size_t size);
     // Returns true while a row is available.
     bool Step();
     void Run() { Step(); Reset(); }

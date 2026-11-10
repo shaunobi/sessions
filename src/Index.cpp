@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace sessions {
@@ -37,6 +38,22 @@ std::vector<std::wstring> Words(std::wstring const& query) {
     }
     if (!current.empty()) words.push_back(current);
     return words;
+}
+
+// Common words carry no signal in a keyword search over whole sessions; a
+// natural-language query keeps only its meaningful words (meaning search still
+// sees the full sentence). Quoted phrases are kept as typed.
+std::vector<std::wstring> KeywordWords(std::wstring const& query) {
+    static const std::unordered_set<std::wstring> common{
+        L"a", L"an", L"and", L"are", L"as", L"at", L"be", L"but", L"by", L"can", L"did", L"do", L"does", L"for", L"from",
+        L"had", L"has", L"have", L"how", L"i", L"if", L"in", L"into", L"is", L"it", L"its", L"me", L"my", L"of", L"on", L"or",
+        L"our", L"so", L"that", L"the", L"their", L"then", L"there", L"these", L"this", L"to", L"was", L"we", L"were",
+        L"what", L"when", L"where", L"which", L"who", L"why", L"will", L"with", L"you", L"your", L"about", L"some", L"any"};
+    auto words = Words(query);
+    std::vector<std::wstring> kept;
+    for (auto const& word : words)
+        if (word.find(L' ') != std::wstring::npos || !common.count(Lower(word))) kept.push_back(word);
+    return kept.empty() ? words : kept;
 }
 
 std::string Term(std::wstring const& word, bool prefix) {
@@ -111,6 +128,14 @@ CREATE TABLE IF NOT EXISTS messages(
   timestamp INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, tokenize='unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS chunks(
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  chunk INTEGER NOT NULL,
+  offset INTEGER NOT NULL,
+  hash INTEGER NOT NULL,
+  PRIMARY KEY(message_id, chunk));
+CREATE INDEX IF NOT EXISTS chunks_hash ON chunks(hash);
+CREATE TABLE IF NOT EXISTS embeddings(hash INTEGER PRIMARY KEY, vector BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS tags(
   session_key TEXT NOT NULL,
   tag TEXT NOT NULL,
@@ -292,7 +317,7 @@ std::vector<std::wstring> Index::AllTags() {
 }
 
 std::vector<SearchHit> Index::Search(std::wstring const& query) {
-    auto words = Words(query);
+    auto words = KeywordWords(query);
     if (words.empty()) return {};
 
     std::unordered_map<int64_t, std::wstring> titles;
@@ -346,25 +371,39 @@ WHERE messages_fts MATCH ?1 GROUP BY m.session_id)sql");
         any += (any.empty() ? "" : " OR ") + term;
     }
     std::unordered_map<int64_t, int64_t> best;
+    std::unordered_map<int64_t, size_t> together;  // sessions with one message holding every word, best first
     auto pick = db.Prepare(R"sql(
 SELECT m.session_id, messages_fts.rowid FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
 WHERE messages_fts MATCH ?1 ORDER BY bm25(messages_fts) LIMIT 20000)sql");
+    bool first = true;
     for (auto const& expression : {all, any}) {
         try {
             pick.Bind(1, expression);
-            while (pick.Step()) best.try_emplace(pick.Int(0), pick.Int(1));
+            while (pick.Step()) {
+                if (best.try_emplace(pick.Int(0), pick.Int(1)).second && first) together.emplace(pick.Int(0), together.size());
+            }
             pick.Reset();
         } catch (DbError const&) {
             pick.Reset();
         }
+        first = false;
     }
     for (auto& hit : hits)
         if (auto it = best.find(hit.session); it != best.end()) hit.bestMessage = it->second;
+    // Long sessions mention almost everything somewhere: words found together in
+    // one message rank ahead of words scattered across a session.
+    std::stable_sort(hits.begin(), hits.end(), [&](auto const& a, auto const& b) {
+        auto ta = together.find(a.session), tb = together.find(b.session);
+        bool ia = ta != together.end(), ib = tb != together.end();
+        if (ia != ib) return ia;
+        if (ia) return ta->second < tb->second;
+        return false;
+    });
     return hits;
 }
 
 std::wstring Index::Snippet(std::wstring const& query, int64_t message) {
-    auto words = Words(query);
+    auto words = KeywordWords(query);
     if (words.empty() || !message) return {};
     std::string any;
     for (size_t i = 0; i < words.size(); ++i)
@@ -378,6 +417,94 @@ std::wstring Index::Snippet(std::wstring const& query, int64_t message) {
     } catch (DbError const&) {
     }
     return {};
+}
+
+void Index::UseEmbeddingModel(std::string const& name) {
+    auto current = db.Prepare("SELECT value FROM meta WHERE key = 'embedding_model'");
+    std::string stored = current.Step() ? std::string(current.Text(0)) : std::string();
+    current.Reset();
+    if (stored == name) return;
+    db.Exec("DELETE FROM chunks; DELETE FROM embeddings;");
+    auto set = db.Prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('embedding_model', ?1)");
+    set.Bind(1, name).Run();
+}
+
+int Index::PendingEmbeddingCount() {
+    auto q = db.Prepare("SELECT count(*) FROM messages m WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.message_id = m.id)");
+    return q.Step() ? int(q.Int(0)) : 0;
+}
+
+std::vector<PendingMessage> Index::MessagesToEmbed(int limit) {
+    std::vector<PendingMessage> out;
+    // Newest sessions first, so recent work becomes searchable by meaning soonest.
+    auto q = db.Prepare(R"sql(
+SELECT m.id, f.text FROM messages m JOIN sessions s ON s.id = m.session_id JOIN messages_fts f ON f.rowid = m.id
+WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.message_id = m.id)
+ORDER BY s.last_activity DESC, m.id LIMIT ?1)sql");
+    q.Bind(1, int64_t(limit));
+    while (q.Step()) out.push_back({q.Int(0), std::string(q.Text(1))});
+    return out;
+}
+
+bool Index::HasEmbedding(int64_t hash) {
+    auto q = db.Prepare("SELECT 1 FROM embeddings WHERE hash = ?1");
+    q.Bind(1, hash);
+    return q.Step();
+}
+
+void Index::StoreEmbedding(int64_t hash, std::vector<float> const& vector) {
+    std::string blob(vector.size(), '\0');
+    for (size_t i = 0; i < vector.size(); ++i)
+        blob[i] = char(int8_t(std::lround(std::clamp(vector[i], -1.0f, 1.0f) * 127.0f)));
+    auto q = db.Prepare("INSERT OR REPLACE INTO embeddings(hash, vector) VALUES(?1, ?2)");
+    q.Bind(1, hash).BindBlob(2, blob.data(), blob.size()).Run();
+}
+
+void Index::StoreChunk(int64_t message, int chunk, int32_t offset, int64_t hash) {
+    auto q = db.Prepare("INSERT OR REPLACE INTO chunks(message_id, chunk, offset, hash) VALUES(?1, ?2, ?3, ?4)");
+    q.Bind(1, message).Bind(2, int64_t(chunk)).Bind(3, int64_t(offset)).Bind(4, hash).Run();
+}
+
+void Index::PruneEmbeddings() {
+    db.Exec("DELETE FROM embeddings WHERE hash NOT IN (SELECT hash FROM chunks)");
+}
+
+int64_t Index::VectorsVersion() {
+    auto q = db.Prepare("SELECT value FROM meta WHERE key = 'vectors_version'");
+    return q.Step() ? std::atoll(std::string(q.Text(0)).c_str()) : 0;
+}
+
+void Index::BumpVectorsVersion() {
+    db.Exec("INSERT INTO meta(key, value) VALUES('vectors_version', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1");
+}
+
+std::vector<ChunkVector> Index::LoadVectors() {
+    std::vector<ChunkVector> out;
+    auto q = db.Prepare(R"sql(
+SELECT m.session_id, c.message_id, c.offset, e.vector FROM chunks c
+JOIN embeddings e ON e.hash = c.hash JOIN messages m ON m.id = c.message_id
+JOIN sessions s ON s.id = m.session_id WHERE s.skipped = '')sql");
+    while (q.Step()) {
+        ChunkVector chunk;
+        chunk.session = q.Int(0);
+        chunk.message = q.Int(1);
+        chunk.offset = int32_t(q.Int(2));
+        auto blob = q.Text(3);
+        chunk.vector.assign(reinterpret_cast<int8_t const*>(blob.data()), reinterpret_cast<int8_t const*>(blob.data()) + blob.size());
+        out.push_back(std::move(chunk));
+    }
+    return out;
+}
+
+std::wstring Index::Passage(int64_t message, int32_t offset, size_t bytes) {
+    auto q = db.Prepare("SELECT text FROM messages_fts WHERE rowid = ?1");
+    q.Bind(1, message);
+    if (!q.Step()) return {};
+    auto text = q.Text(0);
+    size_t start = std::min<size_t>(size_t(std::max(offset, 0)), text.size());
+    std::string piece = Clip(text.substr(start), bytes);
+    return (start > 0 ? L"…" : L"") + Wide(Squash(piece));
 }
 
 void Index::RenameAccount(std::string const& account, std::wstring const& name) {

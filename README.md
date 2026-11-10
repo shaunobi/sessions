@@ -37,7 +37,19 @@ On this PC a full index from empty takes about 4 seconds: 3,681 files, of which 
 
 ## Search
 
-Every word must appear somewhere in the session, in its messages or its title; the last word also matches as a prefix while typing, and `"quoted phrases"` match exactly. Results show the best-matching passage with the words highlighted. Sort by last activity (the default), best match, start date or message count. Keyword search uses SQLite FTS5; meaning-based search is planned (see below).
+Each search runs two ways at once and merges the results:
+
+- **Words.** Every word must appear in the session, in its messages or its title. Common words ("the", "to", "that") are ignored unless quoted, the last word also matches as a prefix while typing, and `"quoted phrases"` match exactly. Sessions where one message holds all the words rank ahead of sessions where they are scattered. The card shows the best passage with the words highlighted. This uses SQLite FTS5.
+- **Meaning.** The query and every message are turned into meaning vectors by a small local model, so "trouble signing in to the cloud" finds a Cloudflare sign-in problem that never used those words. Cards found this way are marked **≈ similar meaning** and show the closest passage.
+
+The two rankings are merged by reciprocal rank fusion. Short queries (one or two words) lean on the words; sentences lean on meaning. While a search is active the sort switches to **Best match**, and it goes back to **Last activity** when the search is cleared, unless you picked a sort yourself.
+
+### Meaning search details
+
+- Model: **BGE small English v1.5** (BAAI, MIT licence, 384 dimensions, 133 MB), downloaded by `build.ps1` from Hugging Face at a pinned revision into `D:\Build\Sessions\models` and installed to `models\` beside the executable. It is not stored in the repository. Without it, meaning search is simply off.
+- Runtime: ONNX Runtime from **Windows Machine Learning** (`Microsoft.Windows.AI.MachineLearning`), on the GPU through DirectML, falling back to the CPU. The tokenizer (BERT WordPiece, uncased) is written in-house in `src/Tokenizer.cpp`.
+- Messages are split into pieces of up to 254 tokens (at most eight per message). Each piece's vector is stored once in the database, keyed by a hash of its tokens, as 384 signed bytes; re-reading a live session only embeds the new pieces. Vectors are searched in memory by brute force, which takes a few milliseconds at this size, so the SQLite vector add-on was not needed.
+- On this PC (RTX 3070) the first pass over all ~20,500 messages takes about 80 seconds after keyword indexing, and the status shows "Learning meaning" with progress. A search, including embedding the query, takes 15–200 ms. The database grows from about 20 MB to about 33 MB.
 
 ## Opening sessions
 
@@ -54,15 +66,14 @@ Right-click a card to add or remove tags, copy the session id, or show the trans
 .\tests\Try-Search.ps1 -Query 'zoom' -OutputPath D:\Build\Sessions\shot.png   # types into the open window and captures it
 ```
 
-`Sessions.exe --index [--db file] [--search "words"]` runs one scan without a window and prints a summary, which is what the test uses.
+`Sessions.exe --index [--db file] [--search "words"]` runs one scan (and the meaning pass) without a window and prints a summary, with meaning-only results marked `[meaning NN]`. It is what the test uses.
 
 ## Libraries
 
-Compiled in, with licences under `third_party`: **SQLite 3.54.1** (public domain, FTS5 enabled) and the **Zstandard 1.5.7** decompressor only (BSD). Windows App SDK 2.5.1 and C++/WinRT come from NuGet as in CardFX.
+Compiled in, with licences under `third_party`: **SQLite 3.54.1** (public domain, FTS5 enabled) and the **Zstandard 1.5.7** decompressor only (BSD). Windows App SDK 2.5.1, Windows Machine Learning 2.1.74 (ONNX Runtime and DirectML) and C++/WinRT come from NuGet as in CardFX. The embedding model is a separate download (above).
 
 ## Not done yet
 
-- **Meaning-based search**: local embeddings through Windows Machine Learning on the GPU and the SQLite vector add-on. Needs an embedding model file chosen and downloaded.
 - **Copying sessions between tools and accounts** (the research track in the decisions log).
 - **Antigravity** desktop and command line.
 - **The icon**: `assets/Sessions.ico` is an interim drawing from `tools/MakePlaceholderIcon.ps1`; the Blender render will replace it.

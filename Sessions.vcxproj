@@ -17,6 +17,8 @@
     <!-- Packages and build output live outside the repository; build.ps1 points them at D: (C: is nearly full). -->
     <SessionsBuildRoot Condition="'$(SessionsBuildRoot)'==''">$(MSBuildThisFileDirectory)build\</SessionsBuildRoot>
     <SessionsPackages>$(SessionsBuildRoot)packages\</SessionsPackages>
+    <SessionsModels>$(SessionsBuildRoot)models\</SessionsModels>
+    <WinMLEnableDefaultOrtHeaderIncludePath>true</WinMLEnableDefaultOrtHeaderIncludePath>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
@@ -33,6 +35,7 @@
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.WinUI.2.3.9\build\native\Microsoft.WindowsAppSDK.WinUI.props" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Runtime.2.5.1\build\native\Microsoft.WindowsAppSDK.Runtime.props" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.2.5.1\build\native\Microsoft.WindowsAppSDK.props" />
+    <Import Project="$(SessionsPackages)Microsoft.Windows.AI.MachineLearning.2.1.74\build\native\Microsoft.Windows.AI.MachineLearning.props" />
   </ImportGroup>
   <PropertyGroup><OutDir>$(SessionsBuildRoot)$(Configuration)\</OutDir><IntDir>$(SessionsBuildRoot)obj\$(Configuration)\</IntDir><TargetName>Sessions</TargetName></PropertyGroup>
   <ItemDefinitionGroup>
@@ -72,9 +75,13 @@
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.WinUI.2.3.9\build\native\Microsoft.WindowsAppSDK.WinUI.targets" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Runtime.2.5.1\build\native\Microsoft.WindowsAppSDK.Runtime.targets" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.2.5.1\build\native\Microsoft.WindowsAppSDK.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.Windows.AI.MachineLearning.2.1.74\build\native\Microsoft.Windows.AI.MachineLearning.targets" />
   </ImportGroup>
   <Target Name="GenerateSessionsResources" AfterTargets="Build">
     <Copy SourceFiles="$(ProjectDir)assets\Sessions.png" DestinationFiles="$(OutDir)Sessions.png" SkipUnchangedFiles="true" />
+    <!-- The embedding model is downloaded by build.ps1, not kept in the repository. -->
+    <ItemGroup><SessionsModelFile Include="$(SessionsModels)*.onnx;$(SessionsModels)*.vocab.txt" /></ItemGroup>
+    <Copy SourceFiles="@(SessionsModelFile)" DestinationFolder="$(OutDir)models" SkipUnchangedFiles="true" />
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)tools\GenerateResources.ps1&quot; -OutputDirectory &quot;$(OutDir).&quot; -IntermediateDirectory &quot;$(IntDir)pri&quot; -IndexName &quot;$(TargetName)&quot;" />
   </Target>
 </Project>
