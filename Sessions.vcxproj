@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{6C1E3A57-0F76-4E6E-9B3A-5E55105E0F76}</ProjectGuid>
+    <RootNamespace>Sessions</RootNamespace><ProjectName>Sessions</ProjectName>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.22000.0</WindowsTargetPlatformMinVersion>
+    <AppxPackage>false</AppxPackage><WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <CppWinRTOptimized>true</CppWinRTOptimized><CppWinRTRootNamespaceAutoMerge>true</CppWinRTRootNamespaceAutoMerge>
+    <UseWinUI>true</UseWinUI><EnableMsixTooling>false</EnableMsixTooling>
+    <!-- Packages and build output live outside the repository; build.ps1 points them at D: (C: is nearly full). -->
+    <SessionsBuildRoot Condition="'$(SessionsBuildRoot)'==''">$(MSBuildThisFileDirectory)build\</SessionsBuildRoot>
+    <SessionsPackages>$(SessionsBuildRoot)packages\</SessionsPackages>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet><UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(SessionsPackages)Microsoft.Windows.CppWinRT.3.0.260818.1\build\native\Microsoft.Windows.CppWinRT.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Base.2.0.4\build\native\Microsoft.WindowsAppSDK.Base.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Foundation.2.3.12\build\native\Microsoft.WindowsAppSDK.Foundation.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.InteractiveExperiences.2.1.9\build\native\Microsoft.WindowsAppSDK.InteractiveExperiences.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.DWrite.2.1.0\build\Microsoft.WindowsAppSDK.DWrite.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.WinUI.2.3.9\build\native\Microsoft.WindowsAppSDK.WinUI.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Runtime.2.5.1\build\native\Microsoft.WindowsAppSDK.Runtime.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.2.5.1\build\native\Microsoft.WindowsAppSDK.props" />
+  </ImportGroup>
+  <PropertyGroup><OutDir>$(SessionsBuildRoot)$(Configuration)\</OutDir><IntDir>$(SessionsBuildRoot)obj\$(Configuration)\</IntDir><TargetName>Sessions</TargetName></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level3</WarningLevel><SDLCheck>true</SDLCheck>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalOptions>/bigobj /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;UNICODE;_UNICODE;_CRT_SECURE_NO_WARNINGS;SQLITE_ENABLE_FTS5;SQLITE_DQS=0;SQLITE_OMIT_LOAD_EXTENSION;SQLITE_DEFAULT_FOREIGN_KEYS=1;ZSTD_DISABLE_ASM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)third_party\sqlite;$(ProjectDir)third_party\zstd;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebugDLL</RuntimeLibrary>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+    </ClCompile>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+    <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation Condition="'$(Configuration)'=='Release'">false</GenerateDebugInformation><AdditionalDependencies>windowsapp.lib;dwmapi.lib;ole32.lib;runtimeobject.lib;shlwapi.lib;shell32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Manifest><AdditionalManifestFiles>app.manifest</AdditionalManifestFiles></Manifest>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\*.cpp" />
+    <ClCompile Include="third_party\sqlite\sqlite3.c;third_party\zstd\common\*.c;third_party\zstd\decompress\*.c">
+      <SDLCheck>false</SDLCheck><WarningLevel>TurnOffAllWarnings</WarningLevel><CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup><ClInclude Include="src\*.h" /><None Include="packages.config" /><None Include="app.manifest" /></ItemGroup>
+  <ItemGroup><ResourceCompile Include="$(ProjectDir)src\Sessions.rc" /><Image Include="$(ProjectDir)assets\Sessions.ico" /><Image Include="$(ProjectDir)assets\Sessions.png" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(SessionsPackages)Microsoft.Web.WebView2.1.0.3719.77\build\native\Microsoft.Web.WebView2.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.Windows.CppWinRT.3.0.260818.1\build\native\Microsoft.Windows.CppWinRT.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Base.2.0.4\build\native\Microsoft.WindowsAppSDK.Base.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Foundation.2.3.12\build\native\Microsoft.WindowsAppSDK.Foundation.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.InteractiveExperiences.2.1.9\build\native\Microsoft.WindowsAppSDK.InteractiveExperiences.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.DWrite.2.1.0\build\Microsoft.WindowsAppSDK.DWrite.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.WinUI.2.3.9\build\native\Microsoft.WindowsAppSDK.WinUI.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Runtime.2.5.1\build\native\Microsoft.WindowsAppSDK.Runtime.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.2.5.1\build\native\Microsoft.WindowsAppSDK.targets" />
+  </ImportGroup>
+  <Target Name="GenerateSessionsResources" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)assets\Sessions.png" DestinationFiles="$(OutDir)Sessions.png" SkipUnchangedFiles="true" />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)tools\GenerateResources.ps1&quot; -OutputDirectory &quot;$(OutDir).&quot; -IntermediateDirectory &quot;$(IntDir)pri&quot; -IndexName &quot;$(TargetName)&quot;" />
+  </Target>
+</Project>

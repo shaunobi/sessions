@@ -1,0 +1,4 @@
+#include "ResourceIds.h"
+
+LANGUAGE 0, 0
+IDI_SESSIONS ICON "assets\\Sessions.ico"

@@ -1,0 +1,24 @@
+# Packages and builds (build.ps1 puts them under D:\Build\Sessions by default).
+build/
+.packages/
+.tools/
+.vs/
+*.user
+*.pdb
+*.obj
+*.ilk
+*.exe
+*.dll
+*.nupkg
+
+# The index holds the text of private conversations: it never leaves this machine.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.log
+*.dmp
+
+# Screenshots from tests/Capture-Window.ps1 show private session titles.
+*.png
+!assets/Sessions.png

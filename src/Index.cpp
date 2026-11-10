@@ -1,0 +1,409 @@
+#include "Index.h"
+#include "Text.h"
+#include <windows.h>
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
+
+namespace sessions {
+
+namespace fs = std::filesystem;
+
+namespace {
+
+constexpr int SchemaVersion = 1;
+
+std::wstring Lower(std::wstring text) {
+    if (!text.empty()) CharLowerBuffW(text.data(), DWORD(text.size()));
+    return text;
+}
+
+// Splits on spaces, keeping "quoted phrases" together.
+std::vector<std::wstring> Words(std::wstring const& query) {
+    std::vector<std::wstring> words;
+    std::wstring current;
+    bool quoted = false;
+    for (wchar_t c : query) {
+        if (c == L'"') {
+            if (!current.empty()) words.push_back(current);
+            current.clear();
+            quoted = !quoted;
+        } else if (!quoted && iswspace(c)) {
+            if (!current.empty()) words.push_back(current);
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) words.push_back(current);
+    return words;
+}
+
+std::string Term(std::wstring const& word, bool prefix) {
+    std::string out = "\"";
+    for (char c : Utf8(word)) {
+        if (c == '"') out += "\"\"";
+        else out.push_back(c);
+    }
+    out += "\"";
+    if (prefix) out += "*";
+    return out;
+}
+
+std::string SessionKey(Family family, std::string const& id) {
+    return (family == Family::Codex ? "codex:" : "claude:") + id;
+}
+
+}  // namespace
+
+std::wstring DefaultAccountName(std::string const& account) {
+    auto colon = account.find(':');
+    std::string family = account.substr(0, colon);
+    std::string id = colon == std::string::npos ? std::string() : account.substr(colon + 1, 8);
+    if (id.empty()) return family == "codex" ? L"ChatGPT (account not recorded)" : L"Claude (account not recorded)";
+    return (family == "codex" ? L"ChatGPT account " : L"Claude organization ") + Wide(id);
+}
+
+Index::Index(fs::path const& file) : db(file) {
+    db.Exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY;");
+    Migrate();
+}
+
+fs::path Index::DefaultFile() { return ExecutableFolder() / L"Sessions.db"; }
+
+void Index::Migrate() {
+    db.Exec(R"sql(
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS accounts(
+  id TEXT PRIMARY KEY,
+  family INTEGER NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  suggested TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS sessions(
+  id INTEGER PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE,
+  family INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_modified INTEGER NOT NULL,
+  skipped TEXT NOT NULL DEFAULT '',
+  tool_file INTEGER NOT NULL,
+  tool INTEGER NOT NULL,
+  account_file TEXT NOT NULL DEFAULT '',
+  account TEXT NOT NULL DEFAULT '',
+  title_file TEXT NOT NULL DEFAULT '',
+  title_app TEXT NOT NULL DEFAULT '',
+  first_prompt TEXT NOT NULL DEFAULT '',
+  cwd TEXT NOT NULL DEFAULT '',
+  app_id TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL DEFAULT 0,
+  last_activity INTEGER NOT NULL DEFAULT 0,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  archived INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS sessions_key ON sessions(key);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  ord INTEGER NOT NULL,
+  role INTEGER NOT NULL,
+  kind INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, tokenize='unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS tags(
+  session_key TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY(session_key, tag));
+)sql");
+    auto set = db.Prepare("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?1)");
+    set.Bind(1, int64_t(SchemaVersion)).Run();
+}
+
+std::unordered_map<std::wstring, KnownFile> Index::KnownFiles() {
+    std::unordered_map<std::wstring, KnownFile> out;
+    auto query = db.Prepare("SELECT path, file_size, file_modified FROM sessions");
+    while (query.Step()) out[query.WText(0)] = {query.Int(1), query.Int(2)};
+    return out;
+}
+
+void Index::Remove(std::wstring const& path) {
+    auto id = db.Prepare("SELECT id FROM sessions WHERE path = ?1");
+    id.Bind(1, Utf8(path));
+    if (!id.Step()) return;
+    int64_t session = id.Int(0);
+    auto fts = db.Prepare("DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?1)");
+    fts.Bind(1, session).Run();
+    auto rows = db.Prepare("DELETE FROM sessions WHERE id = ?1");
+    rows.Bind(1, session).Run();
+}
+
+void Index::Store(SourceFile const& file, ParsedSession const& parsed) {
+    Remove(file.path.wstring());
+    auto insert = db.Prepare(R"sql(
+INSERT INTO sessions(path, family, key, external_id, file_size, file_modified, skipped, tool_file, tool,
+  account_file, account, title_file, first_prompt, cwd, created, last_activity, message_count)
+VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?9, ?10, ?11, ?12, ?13, ?14, ?15))sql");
+    insert.Bind(1, Utf8(file.path.wstring()))
+        .Bind(2, int64_t(file.family))
+        .Bind(3, SessionKey(file.family, parsed.externalId))
+        .Bind(4, parsed.externalId)
+        .Bind(5, file.size)
+        .Bind(6, file.modified)
+        .Bind(7, parsed.skip ? (parsed.skipReason.empty() ? std::string("skipped") : parsed.skipReason) : std::string())
+        .Bind(8, int64_t(parsed.tool))
+        .Bind(9, parsed.account)
+        .Bind(10, parsed.titleFile)
+        .Bind(11, parsed.firstPrompt)
+        .Bind(12, parsed.cwd)
+        .Bind(13, parsed.created)
+        .Bind(14, parsed.lastActivity ? parsed.lastActivity : file.modified)
+        .Bind(15, int64_t(parsed.skip ? 0 : parsed.messages.size()));
+    insert.Run();
+    if (parsed.skip) return;
+    int64_t session = db.LastId();
+    auto message = db.Prepare("INSERT INTO messages(session_id, ord, role, kind, timestamp) VALUES(?1, ?2, ?3, ?4, ?5)");
+    auto text = db.Prepare("INSERT INTO messages_fts(rowid, text) VALUES(?1, ?2)");
+    int64_t ord = 0;
+    for (auto const& m : parsed.messages) {
+        message.Bind(1, session).Bind(2, ord++).Bind(3, int64_t(m.role)).Bind(4, int64_t(m.kind)).Bind(5, m.timestamp);
+        message.Run();
+        text.Bind(1, db.LastId()).Bind(2, m.text);
+        text.Run();
+    }
+}
+
+void Index::ApplyMetadata(AppMetadata const& meta) {
+    struct Row {
+        int64_t id;
+        Family family;
+        std::string external, accountFile;
+        Tool toolFile;
+    };
+    std::vector<Row> rows;
+    {
+        auto query = db.Prepare("SELECT id, family, external_id, account_file, tool_file FROM sessions WHERE skipped = ''");
+        while (query.Step())
+            rows.push_back({query.Int(0), Family(query.Int(1)), std::string(query.Text(2)), std::string(query.Text(3)), Tool(query.Int(4))});
+    }
+    auto update = db.Prepare("UPDATE sessions SET tool = ?2, account = ?3, title_app = ?4, app_id = ?5, archived = ?6 WHERE id = ?1");
+    auto account = db.Prepare("INSERT OR IGNORE INTO accounts(id, family) VALUES(?1, ?2)");
+    std::unordered_set<std::string> accounts;
+    for (auto const& row : rows) {
+        Tool tool = row.toolFile;
+        std::string owner = row.accountFile;
+        AppEntry const* app = nullptr;
+        if (row.family == Family::Claude) {
+            if (auto it = meta.claude.find(row.external); it != meta.claude.end()) app = &it->second;
+            if (app) {
+                tool = Tool::ClaudeDesktop;
+                owner = app->account;
+            } else if (owner.empty()) {
+                // Recorded nowhere in the transcript: assume the command line's current sign-in.
+                owner = meta.claudeCliAccount.empty() ? "claude:" : meta.claudeCliAccount;
+            }
+        } else {
+            if (auto it = meta.codex.find(row.external); it != meta.codex.end()) app = &it->second;
+            if (owner.empty()) owner = "codex:";
+        }
+        update.Bind(1, row.id)
+            .Bind(2, int64_t(tool))
+            .Bind(3, owner)
+            .Bind(4, app ? std::string_view(app->title) : std::string_view())
+            .Bind(5, app ? std::string_view(app->appId) : std::string_view())
+            .Bind(6, int64_t(app && app->archived));
+        update.Run();
+        if (accounts.insert(owner).second) account.Bind(1, owner).Bind(2, int64_t(row.family)).Run();
+    }
+    auto suggest = db.Prepare("UPDATE accounts SET suggested = ?2 WHERE id = ?1");
+    for (auto const& [id, name] : meta.accountNames) suggest.Bind(1, id).Bind(2, name).Run();
+}
+
+void Index::ForgetAccount(std::string const& account) {
+    db.Exec("DROP TABLE IF EXISTS temp.forget; CREATE TEMP TABLE forget(id INTEGER PRIMARY KEY);");
+    auto pick = db.Prepare("INSERT INTO temp.forget SELECT id FROM sessions WHERE account = ?1");
+    pick.Bind(1, account).Run();
+    db.Exec(
+        "DELETE FROM messages_fts WHERE rowid IN (SELECT m.id FROM messages m JOIN temp.forget f ON f.id = m.session_id);"
+        "DELETE FROM sessions WHERE id IN (SELECT id FROM temp.forget); DROP TABLE temp.forget;");
+}
+
+void Index::ForgetAll() {
+    db.Exec("DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM sessions;");
+}
+
+std::vector<SessionRow> Index::LoadSessions() {
+    std::unordered_map<std::string, std::vector<std::wstring>> tags;
+    {
+        auto query = db.Prepare("SELECT session_key, tag FROM tags ORDER BY tag");
+        while (query.Step()) tags[std::string(query.Text(0))].push_back(query.WText(1));
+    }
+    std::vector<SessionRow> out;
+    auto query = db.Prepare(R"sql(
+SELECT id, key, tool, COALESCE(NULLIF(title_app, ''), NULLIF(title_file, ''), first_prompt), account, cwd, external_id,
+  app_id, path, created, last_activity, message_count, archived
+FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
+    while (query.Step()) {
+        SessionRow row;
+        row.id = query.Int(0);
+        row.key = query.Text(1);
+        row.tool = Tool(query.Int(2));
+        row.title = query.WText(3);
+        row.account = query.Text(4);
+        row.cwd = query.WText(5);
+        row.externalId = query.WText(6);
+        row.appId = query.WText(7);
+        row.path = query.WText(8);
+        row.created = query.Int(9);
+        row.lastActivity = query.Int(10);
+        row.messages = int(query.Int(11));
+        row.archived = query.Int(12) != 0;
+        if (auto it = tags.find(row.key); it != tags.end()) row.tags = it->second;
+        if (row.title.empty()) row.title = L"Untitled session";
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+std::vector<AccountRow> Index::Accounts() {
+    std::vector<AccountRow> out;
+    auto query = db.Prepare(R"sql(
+SELECT a.id, a.family, a.name, a.suggested, (SELECT count(*) FROM sessions s WHERE s.account = a.id AND s.skipped = '')
+FROM accounts a ORDER BY a.family, a.id)sql");
+    while (query.Step()) {
+        AccountRow row;
+        row.id = query.Text(0);
+        row.family = Family(query.Int(1));
+        row.name = query.WText(2);
+        row.named = !row.name.empty();
+        if (row.name.empty()) row.name = query.WText(3);
+        if (row.name.empty()) row.name = DefaultAccountName(row.id);
+        row.sessions = int(query.Int(4));
+        if (row.sessions) out.push_back(std::move(row));
+    }
+    return out;
+}
+
+std::vector<std::wstring> Index::AllTags() {
+    std::vector<std::wstring> out;
+    auto query = db.Prepare("SELECT DISTINCT tag FROM tags ORDER BY tag COLLATE NOCASE");
+    while (query.Step()) out.push_back(query.WText(0));
+    return out;
+}
+
+std::vector<SearchHit> Index::Search(std::wstring const& query) {
+    auto words = Words(query);
+    if (words.empty()) return {};
+
+    std::unordered_map<int64_t, std::wstring> titles;
+    {
+        auto q = db.Prepare("SELECT id, COALESCE(NULLIF(title_app, ''), NULLIF(title_file, ''), first_prompt) FROM sessions WHERE skipped = ''");
+        while (q.Step()) titles[q.Int(0)] = Lower(q.WText(1));
+    }
+    const double total = double(std::max<size_t>(titles.size(), 1));
+
+    struct Acc {
+        double score = 0;
+        size_t words = 0;
+    };
+    std::unordered_map<int64_t, Acc> sessions;
+    auto counts = db.Prepare(R"sql(
+SELECT m.session_id, count(*) FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+WHERE messages_fts MATCH ?1 GROUP BY m.session_id)sql");
+    for (size_t i = 0; i < words.size(); ++i) {
+        const bool last = i + 1 == words.size();
+        std::unordered_map<int64_t, double> found;
+        try {
+            counts.Bind(1, Term(words[i], last && words[i].size() >= 2));
+            while (counts.Step()) found[counts.Int(0)] = 1.0 + std::log(double(counts.Int(1)));
+            counts.Reset();
+        } catch (DbError const&) {
+            counts.Reset();
+        }
+        auto needle = Lower(words[i]);
+        for (auto const& [id, title] : titles)
+            if (title.find(needle) != std::wstring::npos) found[id] += 3.0;
+        const double idf = std::log(1.0 + total / double(std::max<size_t>(found.size(), 1)));
+        for (auto const& [id, weight] : found) {
+            auto& acc = sessions[id];
+            if (acc.words == i) {
+                acc.score += weight * idf;
+                acc.words = i + 1;
+            }
+        }
+    }
+
+    std::vector<SearchHit> hits;
+    for (auto const& [id, acc] : sessions)
+        if (acc.words == words.size()) hits.push_back({id, acc.score, 0});
+    std::sort(hits.begin(), hits.end(), [](auto const& a, auto const& b) { return a.score > b.score; });
+
+    // Pick the best message per session for its snippet: all words first, then any word.
+    std::string all, any;
+    for (size_t i = 0; i < words.size(); ++i) {
+        auto term = Term(words[i], i + 1 == words.size() && words[i].size() >= 2);
+        all += (all.empty() ? "" : " ") + term;
+        any += (any.empty() ? "" : " OR ") + term;
+    }
+    std::unordered_map<int64_t, int64_t> best;
+    auto pick = db.Prepare(R"sql(
+SELECT m.session_id, messages_fts.rowid FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+WHERE messages_fts MATCH ?1 ORDER BY bm25(messages_fts) LIMIT 20000)sql");
+    for (auto const& expression : {all, any}) {
+        try {
+            pick.Bind(1, expression);
+            while (pick.Step()) best.try_emplace(pick.Int(0), pick.Int(1));
+            pick.Reset();
+        } catch (DbError const&) {
+            pick.Reset();
+        }
+    }
+    for (auto& hit : hits)
+        if (auto it = best.find(hit.session); it != best.end()) hit.bestMessage = it->second;
+    return hits;
+}
+
+std::wstring Index::Snippet(std::wstring const& query, int64_t message) {
+    auto words = Words(query);
+    if (words.empty() || !message) return {};
+    std::string any;
+    for (size_t i = 0; i < words.size(); ++i)
+        any += (any.empty() ? "" : " OR ") + Term(words[i], i + 1 == words.size() && words[i].size() >= 2);
+    try {
+        auto q = db.Prepare(
+            "SELECT snippet(messages_fts, 0, char(1), char(2), '\xE2\x80\xA6', 24) FROM messages_fts "
+            "WHERE messages_fts MATCH ?1 AND rowid = ?2");
+        q.Bind(1, any).Bind(2, message);
+        if (q.Step()) return q.WText(0);
+    } catch (DbError const&) {
+    }
+    return {};
+}
+
+void Index::RenameAccount(std::string const& account, std::wstring const& name) {
+    auto q = db.Prepare("UPDATE accounts SET name = ?2 WHERE id = ?1");
+    q.Bind(1, account).Bind(2, Utf8(name)).Run();
+}
+
+void Index::AddTag(std::string const& key, std::wstring const& tag) {
+    auto q = db.Prepare("INSERT OR IGNORE INTO tags(session_key, tag) VALUES(?1, ?2)");
+    q.Bind(1, key).Bind(2, Utf8(tag)).Run();
+}
+
+void Index::RemoveTag(std::string const& key, std::wstring const& tag) {
+    auto q = db.Prepare("DELETE FROM tags WHERE session_key = ?1 AND tag = ?2");
+    q.Bind(1, key).Bind(2, Utf8(tag)).Run();
+}
+
+Index::Totals Index::Count() {
+    Totals totals;
+    auto q = db.Prepare("SELECT sum(skipped = ''), sum(skipped <> ''), (SELECT count(*) FROM messages) FROM sessions");
+    if (q.Step()) {
+        totals.sessions = int(q.Int(0));
+        totals.skipped = int(q.Int(1));
+        totals.messages = int(q.Int(2));
+    }
+    return totals;
+}
+
+}  // namespace sessions
