@@ -127,7 +127,11 @@ ToolLook LookOf(Tool tool) {
 using sessions::Found;
 
 // A PNG embedded in the executable as an image source; nullptr when missing.
-Imaging::BitmapImage EmbeddedImage(int id) {
+// `size` is the logical size it will be drawn at: Windows' decoder scales the
+// large source down with high quality filtering (including display scaling),
+// instead of XAML shrinking a 256-pixel bitmap at draw time, which leaves
+// jagged edges.
+Imaging::BitmapImage EmbeddedImage(int id, int size = 0) {
     auto bytes = sessions::EmbeddedFile(id);
     if (bytes.empty()) return nullptr;
     com_ptr<IStream> memory;
@@ -138,6 +142,11 @@ Imaging::BitmapImage EmbeddedImage(int id) {
                                                   put_abi(stream))))
         return nullptr;
     Imaging::BitmapImage image;
+    if (size > 0) {
+        image.DecodePixelType(Imaging::DecodePixelType::Logical);
+        image.DecodePixelWidth(size);
+        image.DecodePixelHeight(size);
+    }
     image.SetSource(stream);
     return image;
 }
@@ -358,10 +367,10 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         const double scale = GetDpiForSystem() / 96.0;
         window.AppWindow().Resize({int32_t(1060 * scale), int32_t(780 * scale)});
 
-        Named<Image>(shell, L"BrandIcon").Source(EmbeddedImage(IDR_BRAND));
-        claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE);
-        claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI);
-        chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT);
+        Named<Image>(shell, L"BrandIcon").Source(EmbeddedImage(IDR_BRAND, 20));
+        claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE, 32);
+        claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI, 32);
+        chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT, 21);
 
         search = Named<TextBox>(shell, L"Search");
         toolFilter = Named<ComboBox>(shell, L"ToolFilter");
