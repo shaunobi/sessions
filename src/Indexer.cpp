@@ -57,7 +57,7 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
     bool changed = false;
     // When the way transcripts are read changes, re-read everything. Meaning
     // vectors are kept by content, so unchanged text is not embedded again.
-    constexpr char const* ParserVersion = "2";
+    constexpr char const* ParserVersion = "3";
     const bool reparse = index.MetaValue("parser_version") != ParserVersion;
     if (request.forgetAll || reparse || !request.forgetAccounts.empty()) {
         Transaction transaction(index.Database());

@@ -41,6 +41,7 @@ struct SearchHit {
     int64_t session = 0;
     double score = 0;
     int64_t bestMessage = 0;    // message to show a snippet from
+    bool together = false;      // one message holds every word (not just the session as a whole)
 };
 
 // One embedded piece of a message, kept in memory for meaning search.
@@ -115,6 +116,8 @@ public:
     std::vector<std::wstring> AllTags();
     // Every word must appear in the session's messages or its title.
     std::vector<SearchHit> Search(std::wstring const& query);
+    // Whether any of the query's words appears in any message at all.
+    bool KnowsAnyWord(std::wstring const& query);
     // Snippet with \x01 ... \x02 around matched terms.
     std::wstring Snippet(std::wstring const& query, int64_t message);
 

@@ -353,7 +353,7 @@ std::vector<SessionRow> Index::LoadSessions() {
     std::vector<SessionRow> out;
     auto query = db.Prepare(R"sql(
 SELECT id, key, tool, COALESCE(NULLIF(title_app, ''), NULLIF(title_file, ''), first_prompt), account, cwd, external_id,
-  app_id, path, created, last_activity, message_count, archived, folder
+  app_id, path, created, last_activity, message_count, archived, folder, first_prompt
 FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
     while (query.Step()) {
         SessionRow row;
@@ -372,6 +372,9 @@ FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
         row.archived = query.Int(12) != 0;
         row.folder = query.WText(13);
         if (auto it = tags.find(row.key); it != tags.end()) row.tags = it->second;
+        bool meaningful = false;
+        for (wchar_t c : row.title) meaningful = meaningful || iswalnum(c);
+        if (!meaningful) row.title = query.WText(14);
         if (row.title.empty()) row.title = L"Untitled session";
         out.push_back(std::move(row));
     }
@@ -476,8 +479,10 @@ WHERE messages_fts MATCH ?1 ORDER BY bm25(messages_fts) LIMIT 20000)sql");
         }
         first = false;
     }
-    for (auto& hit : hits)
+    for (auto& hit : hits) {
         if (auto it = best.find(hit.session); it != best.end()) hit.bestMessage = it->second;
+        hit.together = together.count(hit.session) > 0;
+    }
     // Long sessions mention almost everything somewhere: words found together in
     // one message rank ahead of words scattered across a session.
     std::stable_sort(hits.begin(), hits.end(), [&](auto const& a, auto const& b) {
@@ -488,6 +493,25 @@ WHERE messages_fts MATCH ?1 ORDER BY bm25(messages_fts) LIMIT 20000)sql");
         return false;
     });
     return hits;
+}
+
+bool Index::KnowsAnyWord(std::wstring const& query) {
+    auto words = KeywordWords(query);
+    auto q = db.Prepare("SELECT 1 FROM messages_fts WHERE messages_fts MATCH ?1 LIMIT 1");
+    for (size_t i = 0; i < words.size(); ++i) {
+        bool letters = false;
+        for (wchar_t c : words[i]) letters = letters || iswalnum(c);
+        if (!letters) continue;
+        try {
+            q.Bind(1, Term(words[i], false));
+            bool found = q.Step();
+            q.Reset();
+            if (found) return true;
+        } catch (DbError const&) {
+            q.Reset();
+        }
+    }
+    return false;
 }
 
 std::wstring Index::Snippet(std::wstring const& query, int64_t message) {

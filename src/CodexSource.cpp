@@ -16,7 +16,7 @@ constexpr size_t MaxMessageBytes = 64 * 1024;
 std::string Texts(json::Value const* content, std::string_view wanted) {
     std::string out;
     if (!content) return out;
-    if (content->IsString()) return content->string;
+    if (content->IsString()) return IsInjectedContext(content->string) ? std::string() : content->string;
     if (!content->IsArray()) return out;
     for (auto const& item : content->array) {
         if (item.Str("type") != wanted) continue;

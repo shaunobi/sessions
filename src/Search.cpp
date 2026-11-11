@@ -13,6 +13,9 @@ constexpr double FusionK = 20.0;
 // Meaning-only results: those within this distance of the best match, up to a cap.
 constexpr float MeaningWindow = 0.08f;
 constexpr float MeaningFloor = 0.55f;
+// Gibberish still lands around 0.65-0.69, as close as some real questions, so
+// a query none of whose words appear anywhere only gets results this similar.
+constexpr float UnknownWordsFloor = 0.75f;  // below this, "similar meaning" is noise (nonsense words score about 0.65)
 constexpr size_t MeaningCap = 40;
 
 struct Best {
@@ -72,10 +75,14 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
     for (size_t rank = 0; rank < keyword.size(); ++rank) {
         auto& found = merged[keyword[rank].session];
         found.session = keyword[rank].session;
-        found.score += keywordWeight / (FusionK + double(rank + 1));
+        // Words scattered across a very long session are weak evidence for a sentence-like query.
+        double weight = keywordWeight;
+        if (!keyword[rank].together && wordCount >= 3) weight *= 0.35;
+        found.score += weight / (FusionK + double(rank + 1));
         keywordMessage[found.session] = keyword[rank].bestMessage;
     }
     const float top = meaning.empty() ? 0 : meaning.front().second.similarity;
+    if (top < UnknownWordsFloor && keyword.empty() && !index.KnowsAnyWord(query)) meaning.clear();
     for (size_t rank = 0; rank < meaning.size(); ++rank) {
         auto const& [session, best] = meaning[rank];
         bool inKeyword = merged.count(session) > 0;

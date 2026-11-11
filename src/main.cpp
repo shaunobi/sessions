@@ -841,7 +841,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             cached.element.ContextFlyout(cardMenu);
         }
         // Uniform tiles; taller while searching to make room for the passage.
-        cached.element.Height(activeQuery.empty() ? (row.tags.empty() ? 104 : 130) : 168);
+        cached.element.Height((activeQuery.empty() ? 104 : 168) + (row.tags.empty() ? 0 : 34));
         if (cached.signature != signature) {
             cached.signature = signature;
             cached.element.Child(CardContent(row, snippet));
@@ -906,21 +906,24 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                             (row.messages == 1 ? L" message" : L" messages");
         if (row.archived) when += L"  \u00B7  archived";
         auto dateLine = line(L"");
+        // Date and size first, then the folder, so a long folder name is what gets cut short.
+        Documents::Run rest;
+        rest.Text(when);
+        dateLine.Inlines().Append(rest);
         if (!row.folder.empty()) {
-            // Folder glyph, folder name, then date and size.
+            Documents::Run gap;
+            gap.Text(L"  \u00B7  ");
+            dateLine.Inlines().Append(gap);
             Documents::Run icon;
             icon.Text(L"\uE8B7 ");
             icon.FontFamily(FontFamily(L"Segoe Fluent Icons"));
             dateLine.Inlines().Append(icon);
             Documents::Run folder;
-            folder.Text(row.folder + L"  \u00B7  ");
+            folder.Text(row.folder);
             folder.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
             dateLine.Inlines().Append(folder);
-            ToolTipService::SetToolTip(dateLine, box_value(row.cwd));
+            ToolTipService::SetToolTip(dateLine, box_value(row.cwd.empty() ? row.folder : row.cwd));
         }
-        Documents::Run rest;
-        rest.Text(when);
-        dateLine.Inlines().Append(rest);
         grid.Children().Append(meta);
 
         if (!snippet.empty()) {
@@ -1338,6 +1341,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         // Leaving the overlay (clicking another window) closes it.
         quick.Activated([this](auto&&, WindowActivatedEventArgs const& e) {
             // (Ignored right after opening, while Windows settles which window is in front.)
+            if (e.WindowActivationState() != WindowActivationState::Deactivated && quickBox) quickBox.Focus(FocusState::Programmatic);
             if (e.WindowActivationState() == WindowActivationState::Deactivated && !quickOpening &&
                 sessions::NowMs() - quickShownAt > 800)
                 HideQuick();
@@ -1386,6 +1390,10 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         quickBox.Text(L"");
         QuickSearch();
         quickBox.Focus(FocusState::Programmatic);
+        // Focus again once the window has finished coming forward.
+        quick.DispatcherQueue().TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Low, [this] {
+            if (quickBox) quickBox.Focus(FocusState::Keyboard);
+        });
     }
 
     void HideQuick() {
@@ -1553,6 +1561,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             stack.Spacing(6);
             TextBlock heading;
             heading.Text((account.id.rfind("gemini:", 0) == 0          ? L"Gemini  ·  "
+                          : account.id.rfind("antigravity:", 0) == 0 ? L"Antigravity  ·  "
                           : account.family == sessions::Family::Codex ? L"ChatGPT / Codex  ·  "
                                                                        : L"Claude  ·  ") +
                          Number(account.sessions) + (account.sessions == 1 ? L" session" : L" sessions"));
