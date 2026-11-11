@@ -202,6 +202,8 @@ void WebSync::Sync(std::optional<Tool> only) {
         return;
     }
     running = true;
+    // Keep the PC from sleeping while a sync runs (a first ChatGPT read takes hours); released when it ends.
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
     changed = false;
     outcomes.clear();
     seenAccounts.clear();
@@ -236,6 +238,7 @@ void WebSync::Next() {
     if (queue.empty()) {
         current = nullptr;
         running = false;
+        SetThreadExecutionState(ES_CONTINUOUS);
         SaveOutcomes();
         report(L"", changed, true);
         if (std::exchange(rerun, false)) SyncAll();

@@ -223,7 +223,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           post({ type: 'error', text: 'ChatGPT conversation ' + id + ': ' + e.message });
         }
         if (++n % 10 === 0) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length });
-        await sleep(1500);  // ChatGPT rate-limits conversation reads; stay well under it
+        await sleep(5000);  // ChatGPT rate-limits conversation reads; one every 5 s stays well under it (about 700 an hour)
       }
     }
     post({ type: 'done' });
