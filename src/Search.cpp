@@ -2,6 +2,7 @@
 #include "Embedder.h"
 #include "Text.h"
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace sessions {
@@ -31,7 +32,19 @@ HybridSearch::HybridSearch(std::filesystem::path const& database) : index(databa
 void HybridSearch::Refresh() {
     auto current = index.VectorsVersion();
     if (current == version) return;
-    vectors = index.LoadVectors();
+    auto loaded = index.LoadVectors();
+    // Grouped by session, so the search keeps each session's best piece without a lookup per piece.
+    std::stable_sort(loaded.begin(), loaded.end(), [](auto const& a, auto const& b) { return a.session < b.session; });
+    pieces.clear();
+    matrix.clear();
+    dims = loaded.empty() ? 0 : loaded.front().vector.size();
+    pieces.reserve(loaded.size());
+    matrix.reserve(loaded.size() * dims);
+    for (auto const& chunk : loaded) {
+        if (chunk.vector.size() != dims) continue;
+        pieces.push_back({chunk.session, chunk.message, chunk.offset});
+        matrix.insert(matrix.end(), chunk.vector.begin(), chunk.vector.end());
+    }
     version = current;
 }
 
@@ -41,18 +54,29 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
     std::vector<std::pair<int64_t, Best>> meaning;
     if (auto embedder = Embedder::Shared()) {
         Refresh();
-        if (!vectors.empty()) {
-            auto q = embedder->EmbedQuery(Utf8(query));
-            std::unordered_map<int64_t, Best> best;
-            for (auto const& chunk : vectors) {
-                if (chunk.vector.size() != q.size()) continue;
-                float dot = 0;
-                for (size_t i = 0; i < q.size(); ++i) dot += q[i] * float(chunk.vector[i]);
-                dot /= 127.0f;
-                auto& b = best[chunk.session];
-                if (dot > b.similarity) b = {dot, chunk.message, chunk.offset};
+        auto q = pieces.empty() ? std::vector<float>() : embedder->EmbedQuery(Utf8(query));
+        if (!pieces.empty() && q.size() == dims) {
+            // The query in the same int8 form as the stored vectors: whole-number dot products
+            // the compiler turns into wide multiply-adds.
+            std::vector<int16_t> qi(dims);
+            for (size_t i = 0; i < dims; ++i) qi[i] = int16_t(std::lround(std::clamp(q[i], -1.0f, 1.0f) * 127.0f));
+            constexpr float Scale = 1.0f / (127.0f * 127.0f);
+            int64_t session = -1;
+            Best b;
+            for (size_t row = 0; row < pieces.size(); ++row) {
+                int8_t const* v = matrix.data() + row * dims;
+                int32_t dot = 0;
+                for (size_t i = 0; i < dims; ++i) dot += int32_t(qi[i]) * int32_t(v[i]);
+                auto const& piece = pieces[row];
+                if (piece.session != session) {
+                    if (session >= 0) meaning.push_back({session, b});
+                    session = piece.session;
+                    b = {};
+                }
+                float similarity = float(dot) * Scale;
+                if (similarity > b.similarity) b = {similarity, piece.message, piece.offset};
             }
-            meaning.assign(best.begin(), best.end());
+            if (session >= 0) meaning.push_back({session, b});
             std::sort(meaning.begin(), meaning.end(), [](auto const& a, auto const& b) { return a.second.similarity > b.second.similarity; });
             if (meaning.size() > 200) meaning.resize(200);
         }
