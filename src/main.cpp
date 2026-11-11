@@ -261,6 +261,12 @@ constexpr wchar_t ShellMarkup[] = LR"(
             <Button x:Name='SignInChatGpt' Content='ChatGPT'/>
             <Button x:Name='SignInGemini' Content='Gemini'/>
           </StackPanel>
+          <StackPanel Orientation='Horizontal' Spacing='8'>
+            <TextBlock Text='Sign out:' VerticalAlignment='Center' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
+            <HyperlinkButton x:Name='SignOutClaude' Content='Claude' Padding='4,2'/>
+            <HyperlinkButton x:Name='SignOutChatGpt' Content='ChatGPT' Padding='4,2'/>
+            <HyperlinkButton x:Name='SignOutGoogle' Content='Google (Gemini)' Padding='4,2'/>
+          </StackPanel>
           <Button x:Name='SyncWeb' Content='Check sign-ins and sync now' Style='{StaticResource AccentButtonStyle}'/>
           <TextBlock x:Name='WebInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
@@ -578,6 +584,16 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         Named<Button>(shell, L"SignInChatGpt").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ChatGptWeb); });
         Named<Button>(shell, L"SignInGemini").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::Gemini); });
         Named<Button>(shell, L"SyncWeb").Click([this](auto&&, auto&&) { webSync->SyncAll(); });
+        auto signOut = [this](Tool tool) {
+            webSync->SignOut(tool, [this](std::wstring message) {
+                if (closing) return;
+                ShowWebInfo();
+                if (webInfo) webInfo.Text(message + L"\n\n" + webInfo.Text());
+            });
+        };
+        Named<HyperlinkButton>(shell, L"SignOutClaude").Click([signOut](auto&&, auto&&) { signOut(Tool::ClaudeWeb); });
+        Named<HyperlinkButton>(shell, L"SignOutChatGpt").Click([signOut](auto&&, auto&&) { signOut(Tool::ChatGptWeb); });
+        Named<HyperlinkButton>(shell, L"SignOutGoogle").Click([signOut](auto&&, auto&&) { signOut(Tool::Gemini); });
         webTimer = window.DispatcherQueue().CreateTimer();
         webTimer.Interval(std::chrono::seconds(20));
         webTimer.IsRepeating(true);

@@ -121,6 +121,22 @@ void WebBrowser::Create(wchar_t const* title, bool visible, std::function<void(b
                                     })
                                     .Get(),
                                 nullptr);
+                            // Pages that open a new window (an account switch, a sign-in
+                            // popup) load in this same window instead, so there is only
+                            // ever one sign-in window to follow.
+                            view->add_NewWindowRequested(
+                                Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+                                    [](ICoreWebView2* sender, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+                                        LPWSTR uri = nullptr;
+                                        if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                                            args->put_Handled(TRUE);
+                                            sender->Navigate(uri);
+                                            CoTaskMemFree(uri);
+                                        }
+                                        return S_OK;
+                                    })
+                                    .Get(),
+                                nullptr);
                             view->add_NavigationCompleted(
                                 Callback<ICoreWebView2NavigationCompletedEventHandler>(
                                     [this](ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
@@ -164,8 +180,48 @@ void WebBrowser::Show() {
     if (browser && browser->controller) browser->controller->put_IsVisible(TRUE);
 }
 
+void WebBrowser::SetTitle(std::wstring const& title) {
+    if (window) SetWindowTextW(window, title.c_str());
+}
+
 void WebBrowser::Hide() {
     if (window) ShowWindow(window, SW_HIDE);
+}
+
+void WebBrowser::ClearSites(std::vector<std::wstring> const& domains, std::function<void(int)> done) {
+    ComPtr<ICoreWebView2_2> view2;
+    ComPtr<ICoreWebView2CookieManager> cookies;
+    if (!Ready() || FAILED(browser->view.As(&view2)) || FAILED(view2->get_CookieManager(&cookies))) {
+        done(0);
+        return;
+    }
+    // All cookies in the profile, then keep those whose domain is one of the sites.
+    auto matches = [domains](std::wstring domain) {
+        while (!domain.empty() && domain.front() == L'.') domain.erase(domain.begin());
+        for (auto const& site : domains)
+            if (domain == site || (domain.size() > site.size() && domain.compare(domain.size() - site.size(), site.size(), site) == 0 &&
+                                   domain[domain.size() - site.size() - 1] == L'.'))
+                return true;
+        return false;
+    };
+    cookies->GetCookies(nullptr, Callback<ICoreWebView2GetCookiesCompletedHandler>(
+                                     [cookies, matches, done](HRESULT result, ICoreWebView2CookieList* list) -> HRESULT {
+                                         int deleted = 0;
+                                         UINT count = 0;
+                                         if (SUCCEEDED(result) && list && SUCCEEDED(list->get_Count(&count))) {
+                                             for (UINT i = 0; i < count; ++i) {
+                                                 ComPtr<ICoreWebView2Cookie> cookie;
+                                                 LPWSTR domain = nullptr;
+                                                 if (FAILED(list->GetValueAtIndex(i, &cookie)) || FAILED(cookie->get_Domain(&domain))) continue;
+                                                 bool remove = domain && matches(domain);
+                                                 CoTaskMemFree(domain);
+                                                 if (remove && SUCCEEDED(cookies->DeleteCookie(cookie.Get()))) ++deleted;
+                                             }
+                                         }
+                                         done(deleted);
+                                         return S_OK;
+                                     })
+                                     .Get());
 }
 
 void WebBrowser::Resize() {

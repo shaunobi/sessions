@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 // A plain window holding an Edge WebView2 browser, used for signing in to
 // Claude, ChatGPT and Gemini and for reading chat history with those
@@ -35,6 +36,10 @@ public:
     void Post(std::wstring const& json);
     void Show();
     void Hide();
+    void SetTitle(std::wstring const& title);
+    // Deletes every cookie the browser holds for these sites (and their
+    // subdomains), which signs it out of them. `done` gets the number deleted.
+    void ClearSites(std::vector<std::wstring> const& domains, std::function<void(int)> done);
 
     void OnMessage(MessageHandler handler) { message = std::move(handler); }
     void OnLoaded(LoadedHandler handler) { loaded = std::move(handler); }

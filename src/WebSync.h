@@ -28,6 +28,10 @@ public:
     // Opens a visible browser at the service's sign-in page. Closing that
     // window starts a sync.
     void SignIn(Tool tool);
+    // Signs Sessions' browser out of a site so the next sign-in can choose another
+    // account. For ChatGPT and Gemini this also signs out of Google, which they
+    // sign in through. `done` receives a sentence for the person.
+    void SignOut(Tool tool, std::function<void(std::wstring)> done);
     void SyncAll();
     bool Running() const { return running; }
     // What Settings shows for each site, from the last check (kept across restarts).

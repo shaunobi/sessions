@@ -94,7 +94,13 @@ void WebSync::SignIn(Tool tool) {
             for (auto const& s : Services) {
                 if (lower.find(s.host) == std::wstring::npos) continue;
                 for (auto marker : {L"/login", L"/auth", L"/signin", L"/sign-in", L"/oauth", L"/magic-link", L"accounts.google"})
-                    if (lower.find(marker) != std::wstring::npos) return;
+                    if (lower.find(marker) != std::wstring::npos) {
+                        signIn->SetTitle(L"Sessions \u00B7 sign in to " + std::wstring(s.name));
+                        return;
+                    }
+                // Past the sign-in pages: say so plainly, and check right away.
+                signIn->SetTitle(L"Sessions \u00B7 " + std::wstring(s.name) +
+                                 L" sign-in done \u2014 close this window; Settings shows the account Sessions found");
                 SyncAll();
                 return;
             }
@@ -107,6 +113,49 @@ void WebSync::SignIn(Tool tool) {
         signIn->Show();
         signIn->Navigate(url);
     }
+}
+
+void WebSync::SignOut(Tool tool, std::function<void(std::wstring)> done) {
+    std::vector<std::wstring> domains;
+    std::wstring name;
+    switch (tool) {
+    case Tool::ClaudeWeb:
+        domains = {L"claude.ai", L"anthropic.com"};
+        name = L"Claude";
+        break;
+    case Tool::ChatGptWeb:
+        domains = {L"chatgpt.com", L"openai.com", L"google.com"};
+        name = L"ChatGPT and Google";
+        break;
+    default:
+        domains = {L"gemini.google.com", L"google.com", L"youtube.com"};
+        name = L"Google (Gemini)";
+        break;
+    }
+    auto finish = [this, tool, name, done](int deleted) {
+        // Forget the remembered status so Settings doesn't show the old account.
+        try { index.SetMetaValue(Utf8(L"web_status_" + std::to_wstring(int(tool))), ""); } catch (...) {}
+        if (tool == Tool::ChatGptWeb || tool == Tool::Gemini)
+            for (auto other : {Tool::ChatGptWeb, Tool::Gemini})
+                if (other != tool) try { index.SetMetaValue(Utf8(L"web_status_" + std::to_wstring(int(other))), ""); } catch (...) {}
+        done(deleted ? L"Signed out of " + name + L". Press its button to sign in with the account you want."
+                     : L"Sessions' browser wasn't signed in to " + name + L".");
+    };
+    // Any browser of the shared profile can clear its cookies; create one if none exists yet.
+    WebBrowser* browser = worker && worker->Ready() ? worker.get() : signIn && signIn->Ready() ? signIn.get() : nullptr;
+    if (browser) {
+        browser->ClearSites(domains, finish);
+        return;
+    }
+    if (!worker) {
+        worker = std::make_unique<WebBrowser>();
+        worker->OnMessage([this](std::wstring const& json) { OnMessage(json); });
+        worker->OnLoaded([this](bool ok, std::wstring const& url) { OnLoaded(ok, url); });
+    }
+    worker->Create(L"Sessions \u00B7 sync", false, [this, domains, finish](bool ok) {
+        if (ok) worker->ClearSites(domains, finish);
+        else finish(0);
+    });
 }
 
 void WebSync::SyncAll() {
