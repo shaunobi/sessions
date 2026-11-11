@@ -57,6 +57,14 @@ struct PendingMessage {
     std::string text;
 };
 
+// A session's name and first prompt, embedded as one extra piece so meaning
+// search knows what the session is about as a whole.
+struct PendingTitle {
+    int64_t session = 0;
+    std::string text;
+    int64_t hash = 0;   // of `text`; a stored vector with another hash is out of date
+};
+
 // A conversation synced from a website (Claude, ChatGPT, Gemini).
 struct WebConversation {
     Tool tool = Tool::ClaudeWeb;
@@ -110,6 +118,9 @@ public:
     int64_t VectorsVersion();
     void BumpVectorsVersion();
     std::vector<ChunkVector> LoadVectors();
+    std::vector<PendingTitle> TitlesToEmbed();
+    void StoreTitleVector(int64_t session, int64_t hash, std::vector<float> const& vector);
+    std::unordered_map<int64_t, std::vector<int8_t>> LoadTitleVectors();
     // About `bytes` of a message's text starting at a piece's offset.
     std::wstring Passage(int64_t message, int32_t offset, size_t bytes = 320);
 

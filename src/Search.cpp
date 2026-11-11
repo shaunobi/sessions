@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace sessions {
 
@@ -45,6 +46,7 @@ void HybridSearch::Refresh() {
         pieces.push_back({chunk.session, chunk.message, chunk.offset});
         matrix.insert(matrix.end(), chunk.vector.begin(), chunk.vector.end());
     }
+    titleVectors = index.LoadTitleVectors();
     version = current;
 }
 
@@ -63,20 +65,53 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
             constexpr float Scale = 1.0f / (127.0f * 127.0f);
             int64_t session = -1;
             Best b;
+            int count = 0;
+            std::unordered_map<int64_t, int> pieceCount;
             for (size_t row = 0; row < pieces.size(); ++row) {
                 int8_t const* v = matrix.data() + row * dims;
                 int32_t dot = 0;
                 for (size_t i = 0; i < dims; ++i) dot += int32_t(qi[i]) * int32_t(v[i]);
                 auto const& piece = pieces[row];
                 if (piece.session != session) {
-                    if (session >= 0) meaning.push_back({session, b});
+                    if (session >= 0) {
+                        meaning.push_back({session, b});
+                        pieceCount[session] = count;
+                    }
                     session = piece.session;
                     b = {};
+                    count = 0;
                 }
+                ++count;
                 float similarity = float(dot) * Scale;
                 if (similarity > b.similarity) b = {similarity, piece.message, piece.offset};
             }
-            if (session >= 0) meaning.push_back({session, b});
+            if (session >= 0) {
+                meaning.push_back({session, b});
+                pieceCount[session] = count;
+            }
+            // What the session is about as a whole: its name and first prompt, at half
+            // the weight of its best piece. A session listed by name only has just that.
+            auto titleScore = [&](int64_t id) -> float {
+                auto it = titleVectors.find(id);
+                if (it == titleVectors.end() || it->second.size() != dims) return -2;
+                int32_t dot = 0;
+                for (size_t i = 0; i < dims; ++i) dot += int32_t(qi[i]) * int32_t(it->second[i]);
+                return float(dot) * Scale;
+            };
+            std::unordered_set<int64_t> scored;
+            for (auto& [id, best] : meaning) {
+                scored.insert(id);
+                if (float t = titleScore(id); t > -2) best.similarity = (best.similarity + 0.5f * t) / 1.5f;
+                // Long sessions get more chances at a high score; take a little back.
+                best.similarity -= 0.01f * std::log(float(std::max(pieceCount[id], 1)));
+            }
+            for (auto const& [id, vector] : titleVectors)
+                if (!scored.count(id)) {
+                    Best only;
+                    only.similarity = titleScore(id);
+                    // A name alone is thinner evidence than a session's own words.
+                    if (only.similarity > -2) meaning.push_back({id, {only.similarity - 0.04f, 0, 0}});
+                }
             std::sort(meaning.begin(), meaning.end(), [](auto const& a, auto const& b) { return a.second.similarity > b.second.similarity; });
             if (meaning.size() > 200) meaning.resize(200);
         }
@@ -97,11 +132,12 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
     std::unordered_map<int64_t, Found> merged;
     std::unordered_map<int64_t, int64_t> keywordMessage;
     for (size_t rank = 0; rank < keyword.size(); ++rank) {
+        // Words scattered across a session, nowhere together, say little about a
+        // question of three or more words: leave those to meaning search.
+        if (!keyword[rank].together && wordCount >= 3) continue;
         auto& found = merged[keyword[rank].session];
         found.session = keyword[rank].session;
-        // Words scattered across a very long session are weak evidence for a sentence-like query.
         double weight = keywordWeight;
-        if (!keyword[rank].together && wordCount >= 3) weight *= 0.35;
         found.score += weight / (FusionK + double(rank + 1));
         keywordMessage[found.session] = keyword[rank].bestMessage;
     }
@@ -130,7 +166,8 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
         if (!found.byMeaning) {
             found.snippet = index.Snippet(query, keywordMessage[found.session]);
         } else if (auto it = meaningBySession.find(found.session); it != meaningBySession.end()) {
-            found.snippet = index.Passage(it->second.message, it->second.offset, 260);
+            found.snippet = it->second.message ? index.Passage(it->second.message, it->second.offset, 260)
+                                               : std::wstring(L"Matched by its name; the messages are not read yet.");
         }
     }
     return out;

@@ -141,6 +141,10 @@ CREATE TABLE IF NOT EXISTS chunks(
   PRIMARY KEY(message_id, chunk));
 CREATE INDEX IF NOT EXISTS chunks_hash ON chunks(hash);
 CREATE TABLE IF NOT EXISTS embeddings(hash INTEGER PRIMARY KEY, vector BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS title_vectors(
+  session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  hash INTEGER NOT NULL,
+  vector BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS tags(
   session_key TEXT NOT NULL,
   tag TEXT NOT NULL,
@@ -546,7 +550,7 @@ void Index::UseEmbeddingModel(std::string const& name) {
     std::string stored = current.Step() ? std::string(current.Text(0)) : std::string();
     current.Reset();
     if (stored == name) return;
-    db.Exec("DELETE FROM chunks; DELETE FROM embeddings;");
+    db.Exec("DELETE FROM chunks; DELETE FROM embeddings; DELETE FROM title_vectors;");
     auto set = db.Prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('embedding_model', ?1)");
     set.Bind(1, name).Run();
 }
@@ -615,6 +619,41 @@ JOIN sessions s ON s.id = m.session_id WHERE s.skipped = '')sql");
         auto blob = q.Text(3);
         chunk.vector.assign(reinterpret_cast<int8_t const*>(blob.data()), reinterpret_cast<int8_t const*>(blob.data()) + blob.size());
         out.push_back(std::move(chunk));
+    }
+    return out;
+}
+
+std::vector<PendingTitle> Index::TitlesToEmbed() {
+    std::vector<PendingTitle> out;
+    auto q = db.Prepare(R"sql(
+SELECT s.id, COALESCE(NULLIF(s.title_app, ''), NULLIF(s.title_file, ''), ''), s.first_prompt, t.hash FROM sessions s
+LEFT JOIN title_vectors t ON t.session_id = s.id WHERE s.skipped = '' ORDER BY s.last_activity DESC)sql");
+    while (q.Step()) {
+        std::string title(q.Text(1)), prompt(q.Text(2));
+        std::string text = title.empty() || title == prompt ? prompt : prompt.empty() ? title : title + ". " + prompt;
+        if (text.find_first_not_of(" \n\r\t") == std::string::npos) continue;
+        uint64_t hash = 14695981039346656037ULL;  // FNV-1a
+        for (unsigned char c : text) hash = (hash ^ c) * 1099511628211ULL;
+        int64_t h = int64_t(hash >> 1) | 1;
+        if (q.IsNull(3) || q.Int(3) != h) out.push_back({q.Int(0), std::move(text), h});
+    }
+    return out;
+}
+
+void Index::StoreTitleVector(int64_t session, int64_t hash, std::vector<float> const& vector) {
+    std::string blob(vector.size(), '\0');
+    for (size_t i = 0; i < vector.size(); ++i)
+        blob[i] = char(int8_t(std::lround(std::clamp(vector[i], -1.0f, 1.0f) * 127.0f)));
+    auto q = db.Prepare("INSERT OR REPLACE INTO title_vectors(session_id, hash, vector) VALUES(?1, ?2, ?3)");
+    q.Bind(1, session).Bind(2, hash).BindBlob(3, blob.data(), blob.size()).Run();
+}
+
+std::unordered_map<int64_t, std::vector<int8_t>> Index::LoadTitleVectors() {
+    std::unordered_map<int64_t, std::vector<int8_t>> out;
+    auto q = db.Prepare("SELECT t.session_id, t.vector FROM title_vectors t JOIN sessions s ON s.id = t.session_id WHERE s.skipped = ''");
+    while (q.Step()) {
+        auto blob = q.Text(1);
+        out[q.Int(0)].assign(reinterpret_cast<int8_t const*>(blob.data()), reinterpret_cast<int8_t const*>(blob.data()) + blob.size());
     }
     return out;
 }

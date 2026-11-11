@@ -2,6 +2,7 @@
 #include "Index.h"
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Keyword search plus meaning search, merged into one ranked list of sessions.
@@ -35,6 +36,7 @@ private:
     std::vector<Piece> pieces;
     std::vector<int8_t> matrix;
     size_t dims = 0;
+    std::unordered_map<int64_t, std::vector<int8_t>> titleVectors;  // per session: its name and first prompt
     int64_t version = -1;
     void Refresh();
 };

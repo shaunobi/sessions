@@ -214,6 +214,31 @@ uint64_t HashTokens(std::vector<int32_t> const& ids) {
     return hash ? hash : 1;  // 0 marks "nothing to embed"
 }
 
+// Embeds each session's name and first prompt (new sessions, or renamed ones).
+void EmbedTitles(Index& index, Embedder& embedder, HANDLE stop) {
+    auto titles = index.TitlesToEmbed();
+    constexpr size_t batchSize = 32;
+    for (size_t start = 0; start < titles.size(); start += batchSize) {
+        if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;
+        std::vector<std::vector<int32_t>> batch;
+        std::vector<size_t> which;
+        for (size_t k = start; k < std::min(titles.size(), start + batchSize); ++k) {
+            std::vector<int32_t> ids;
+            for (auto const& token : embedder.Tokens().Encode(titles[k].text, ChunkTokens)) ids.push_back(token.id);
+            if (ids.empty()) continue;
+            batch.push_back(std::move(ids));
+            which.push_back(k);
+        }
+        if (batch.empty()) continue;
+        auto results = embedder.Embed(batch);
+        Transaction transaction(index.Database());
+        for (size_t k = 0; k < results.size() && k < which.size(); ++k)
+            index.StoreTitleVector(titles[which[k]].session, titles[which[k]].hash, results[k]);
+        index.BumpVectorsVersion();
+        transaction.Commit();
+    }
+}
+
 // Embeds messages that have no vectors yet, newest sessions first. Stops early
 // for shutdown or when a rescan is requested (the request is left signaled).
 void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, HANDLE request) {
@@ -225,6 +250,7 @@ void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, 
         index.UseEmbeddingModel(EmbeddingModelName);
         transaction.Commit();
     }
+    EmbedTitles(index, *embedder, stop);
     const int pending = index.PendingEmbeddingCount();
     if (pending == 0) return;
 
