@@ -317,7 +317,22 @@ void WebSync::OnLoaded(bool succeeded, std::wstring const& url) {
         return;
     }
     injected = true;
-    worker->Run(std::wstring(L"(function(){\n") + agents::Common + current->agent + L"\n})();");
+    // What Sessions already has, so a long ChatGPT history is listed in full only once
+    // a day; other times only the chats changed since the newest one stored.
+    std::wstring hint = L"{\"full\":true,\"since\":0}";
+    if (current->tool == Tool::ChatGptWeb) {
+        int64_t lastFull = 0, newest = 0;
+        try {
+            lastFull = std::atoll(index.MetaValue(Utf8(L"web_full_list_" + std::to_wstring(int(current->tool)))).c_str());
+            auto q = index.Database().Prepare("SELECT max(file_modified) FROM sessions WHERE family = 3 AND tool = ?1");
+            q.Bind(1, int64_t(current->tool));
+            if (q.Step()) newest = q.Int(0);
+        } catch (...) {
+        }
+        const bool full = !newest || NowMs() - lastFull > 24LL * 3600 * 1000;
+        hint = std::wstring(L"{\"full\":") + (full ? L"true" : L"false") + L",\"since\":" + std::to_wstring(newest) + L"}";
+    }
+    worker->Run(std::wstring(L"(function(){\nconst sessionsHint = ") + hint + L";\n" + agents::Common + current->agent + L"\n})();");
 }
 
 void WebSync::OnMessage(std::wstring const& text) {
@@ -421,7 +436,22 @@ void WebSync::OnMessage(std::wstring const& text) {
             } catch (...) {
             }
         }
-        if (auto complete = message.Get("complete"); complete && complete->IsTrue()) {
+        const bool complete = message.Get("complete") && message.Get("complete")->IsTrue();
+        if (!complete) {
+            // Only recent changes were listed: chats stored by name only still need reading.
+            for (auto const& [id, version] : known)
+                if (version == 0 && wanted < batch * 4) {
+                    if (++wanted > batch) {
+                        moreToRead = true;
+                        continue;
+                    }
+                    ids += (first ? "" : ",") + JsonString(id);
+                    first = false;
+                }
+        } else if (current->tool == Tool::ChatGptWeb) {
+            try { index.SetMetaValue(Utf8(L"web_full_list_" + std::to_wstring(int(current->tool))), std::to_string(NowMs())); } catch (...) {}
+        }
+        if (complete) {
             Transaction transaction(index.Database());
             if (index.RemoveWebMissing(account, present) > 0) changed = true;
             transaction.Commit();
@@ -441,7 +471,8 @@ void WebSync::OnMessage(std::wstring const& text) {
                 Message entry;
                 entry.role = m.Str("role") == "user" ? Role::User : Role::Assistant;
                 entry.timestamp = ParseIsoMs(m.Str("ts"));
-                entry.text = Clip(m.Str("text"), MaxMessageBytes);
+                entry.text = Clip(current->tool == Tool::ChatGptWeb ? CleanChatGptText(m.Str("text")) : std::string(m.Str("text")),
+                                  MaxMessageBytes);
                 if (entry.text.empty()) continue;
                 if (entry.timestamp && (!c.created || entry.timestamp < c.created)) c.created = entry.timestamp;
                 if (entry.timestamp > c.updated) c.updated = entry.timestamp;

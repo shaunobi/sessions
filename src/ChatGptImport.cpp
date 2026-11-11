@@ -195,7 +195,7 @@ ImportResult ImportChatGptExport(fs::path const& database, fs::path const& sourc
             std::reverse(chain.begin(), chain.end());
             for (auto m : chain) {
                 if (!Shown(*m)) continue;
-                std::string said = TextOf(*m);
+                std::string said = CleanChatGptText(TextOf(*m));
                 if (said.find_first_not_of(" \n\r\t") == std::string::npos) continue;
                 Message entry;
                 entry.role = m->Get("author")->Str("role") == "user" ? Role::User : Role::Assistant;

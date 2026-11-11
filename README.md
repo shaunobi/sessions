@@ -58,7 +58,7 @@ The two rankings are merged by reciprocal rank fusion. Short queries (one or two
 
 ### Meaning search details
 
-- Model: **BGE small English v1.5** (BAAI, MIT licence, 384 dimensions, 133 MB). `build.ps1` downloads it from Hugging Face at a pinned revision into `D:\Build\Sessions\models`, and it is compiled into the executable. It is not stored in the repository.
+- Model: **Snowflake Arctic Embed M v1.5** (Apache 2.0, 768 dimensions, 436 MB), chosen by scoring six candidates on 30 real searches. `build.ps1` downloads it from Hugging Face at a pinned revision into `D:\Build\Sessions\models` and copies it to a `Model` folder beside `Sessions.exe`; it is not stored in the repository. Set `SESSIONS_MODEL` to another folder (model.onnx + vocab.txt) to try a different model; the vectors are re-made when the model changes.
 - Runtime: ONNX Runtime from **Windows Machine Learning** (`Microsoft.Windows.AI.MachineLearning`), on the GPU through DirectML, falling back to the CPU. The tokenizer (BERT WordPiece, uncased) is written in-house in `src/Tokenizer.cpp`.
 - Messages are split into pieces of up to 254 tokens (at most eight per message). Each piece's vector is stored once in the database, keyed by a hash of its tokens, as 384 signed bytes; re-reading a live session only embeds the new pieces. Vectors are searched in memory by brute force, which takes a few milliseconds at this size, so the SQLite vector add-on was not needed.
 - On this PC (RTX 3070) the first pass over all ~20,500 messages takes about 80 seconds after keyword indexing, and the status shows "Learning meaning" with progress. A search, including embedding the query, takes 15–200 ms. The database grows from about 20 MB to about 33 MB.

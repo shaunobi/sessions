@@ -456,7 +456,22 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         items = single_threaded_observable_vector<IInspectable>();
         cards.ItemsSource(items);
         cards.ItemClick([this](auto&&, ItemClickEventArgs const& e) {
-            if (auto card = e.ClickedItem().try_as<FrameworkElement>()) Open(unbox_value<int64_t>(card.Tag()));
+            if (auto id = e.ClickedItem().try_as<int64_t>()) Open(*id);
+        });
+        // Only the cards on screen exist: the list holds session ids and each card is
+        // made as its slot comes into view (thousands of sessions stay quick).
+        cards.ContainerContentChanging([this](ListViewBase const&, ContainerContentChangingEventArgs const& args) {
+            args.Handled(true);
+            if (args.InRecycleQueue()) {
+                args.ItemContainer().Content(nullptr);
+                return;
+            }
+            auto id = args.Item().try_as<int64_t>();
+            auto row = id ? Row(*id) : nullptr;
+            try {
+                args.ItemContainer().Content(row ? IInspectable(CardFor(*row)) : nullptr);
+            } catch (winrt::hresult_error const&) {
+            }
         });
         BuildCardMenu();
 
@@ -467,7 +482,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             toolFilter.Items().Append(box_value(sessions::ToolName(tool)));
         }
         toolFilter.SelectedIndex(0);
-        for (auto label : {L"Last activity", L"Best match", L"Created", L"Most messages"}) sortBox.Items().Append(box_value(label));
+        for (auto label : {L"Last activity", L"Best match", L"Created", L"Most messages", L"Oldest first"}) sortBox.Items().Append(box_value(label));
         sortBox.SelectedIndex(0);
         for (auto combo : {toolFilter, accountFilter, tagFilter})
             combo.SelectionChanged([this](auto&&, auto&&) { if (!populatingFilters) Render(); });
@@ -553,7 +568,6 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 double before = logoScale;
                 LoadLogos();
                 if (before != logoScale) {
-                    cardCache.clear();
                     shown.clear();
                     Render();
                 }
@@ -793,11 +807,13 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             activeQuery.clear();
             searching = false;
             found.clear();
+            sortChosen = false;
             SetSort(0);
             Render();
             return;
         }
         if (query == activeQuery && !searching) return;
+        if (activeQuery.empty()) sortChosen = false;  // a fresh search starts on Best match
         searching = true;
         searchTicket = searcher->Ask(query);
         countText.Text(L"Searching…");
@@ -849,15 +865,18 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             std::stable_sort(visible.begin(), visible.end(), [](auto a, auto b) { return a->created > b->created; });
         else if (sort == 3)
             std::stable_sort(visible.begin(), visible.end(), [](auto a, auto b) { return a->messages > b->messages; });
+        else if (sort == 4)
+            std::stable_sort(visible.begin(), visible.end(), [](auto a, auto b) { return a->lastActivity < b->lastActivity; });
         else
             std::stable_sort(visible.begin(), visible.end(), byActivity);
 
-        constexpr size_t limit = 3000;
         std::vector<int64_t> ids;
         std::vector<IInspectable> elements;
-        for (size_t i = 0; i < visible.size() && i < limit; ++i) {
-            ids.push_back(visible[i]->id);
-            elements.push_back(CardFor(*visible[i]));
+        ids.reserve(visible.size());
+        elements.reserve(visible.size());
+        for (auto row : visible) {
+            ids.push_back(row->id);
+            elements.push_back(box_value(row->id));
         }
         if (ids != shown) {
             // A new search or filter starts at the top; a live update keeps its place.
@@ -865,6 +884,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             items.ReplaceAll(elements);
             shown = std::move(ids);
             if (newList && items.Size() > 0) cards.ScrollIntoView(items.GetAt(0));
+        } else {
+            // Same cards in the same order: refresh the ones on screen (new titles, counts, snippets).
+            for (uint32_t i = 0; i < items.Size(); ++i)
+                if (auto container = cards.ContainerFromIndex(int32_t(i)).try_as<ContentControl>())
+                    if (auto row = Row(shown[i])) container.Content(CardFor(*row));
         }
 
         std::wstring count;
@@ -872,7 +896,6 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             count = Number(int64_t(visible.size())) + (visible.size() == 1 ? L" session matches" : L" sessions match");
         else
             count = Number(int64_t(visible.size())) + (visible.size() == 1 ? L" session" : L" sessions");
-        if (visible.size() > limit) count += L" · showing the first " + Number(limit);
         countText.Text(count);
 
         if (visible.empty()) {
@@ -895,26 +918,21 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                                  (row.archived ? L"\x1F" L"a" : L"");
         for (auto const& tag : row.tags) signature += L"\x1F#" + tag;
         if (sortBox && sortBox.SelectedIndex() == 2) signature += L"\x1F" L"created";  // cards show the start date
-        auto& cached = cardCache[row.id];
-        if (!cached.element) {
-            cached.element = Border();
-            cached.element.Tag(box_value(row.id));
-            cached.element.CornerRadius({8, 8, 8, 8});
-            cached.element.BorderThickness({1, 1, 1, 1});
-            cached.element.Padding({14, 12, 14, 12});
-            cached.element.Width(300);
-            cached.element.Background(ThemeBrush(L"CardBackgroundFillColorDefaultBrush"));
-            cached.element.BorderBrush(ThemeBrush(L"CardStrokeColorDefaultBrush"));
-            cached.element.ContextFlyout(cardMenu);
-        }
+        (void)signature;
+        Border card;
+        card.Tag(box_value(row.id));
+        card.CornerRadius({8, 8, 8, 8});
+        card.BorderThickness({1, 1, 1, 1});
+        card.Padding({14, 12, 14, 12});
+        card.Width(300);
+        card.Background(ThemeBrush(L"CardBackgroundFillColorDefaultBrush"));
+        card.BorderBrush(ThemeBrush(L"CardStrokeColorDefaultBrush"));
+        card.ContextFlyout(cardMenu);
         // Uniform tiles; taller while searching to make room for the passage.
-        cached.element.Height((activeQuery.empty() ? 104 : 168) + (row.tags.empty() ? 0 : 34));
-        if (cached.signature != signature) {
-            cached.signature = signature;
-            cached.element.Child(CardContent(row, snippet));
-            Automation::AutomationProperties::SetName(cached.element, hstring(row.title + L", " + sessions::ToolName(row.tool)));
-        }
-        return cached.element;
+        card.Height((activeQuery.empty() ? 104 : 168) + (row.tags.empty() ? 0 : 34));
+        card.Child(CardContent(row, snippet));
+        Automation::AutomationProperties::SetName(card, hstring(row.title + L", " + sessions::ToolName(row.tool)));
+        return card;
     }
 
     // A fixed-size tile: badge and two-line title, then tool, account, date and

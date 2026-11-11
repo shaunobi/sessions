@@ -181,6 +181,45 @@ std::string OwnWords(std::string_view text) {
     return out;
 }
 
+std::string CleanChatGptText(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    // U+E200..U+E2FF are EE 88 80 .. EE 8B BF in UTF-8; E200 opens a marker, E201 closes it.
+    auto privateUse = [&](size_t i) -> int {
+        if (i + 2 < text.size() && uint8_t(text[i]) == 0xEE && uint8_t(text[i + 1]) >= 0x88 && uint8_t(text[i + 1]) <= 0x8B)
+            return (uint8_t(text[i + 1]) - 0x88) * 64 + (uint8_t(text[i + 2]) & 0x3F);
+        return -1;
+    };
+    for (size_t i = 0; i < text.size();) {
+        int code = privateUse(i);
+        if (code == 0) {  // U+E200: skip to the matching U+E201
+            size_t j = i + 3;
+            while (j < text.size() && privateUse(j) != 1) ++j;
+            i = j < text.size() ? j + 3 : text.size();
+            continue;
+        }
+        if (code >= 0) {  // any other marker character
+            i += 3;
+            continue;
+        }
+        // 【4:2†source】 style references.
+        if (text.substr(i, 3) == "\xE3\x80\x90") {
+            auto close = text.find("\xE3\x80\x91", i);
+            auto dagger = text.find("\xE2\x80\xA0", i);
+            if (close != std::string_view::npos && dagger != std::string_view::npos && dagger < close && close - i < 200) {
+                i = close + 3;
+                continue;
+            }
+        }
+        out.push_back(text[i++]);
+    }
+    auto start = out.find_first_not_of(" \n\r\t");
+    if (start == std::string::npos) return {};
+    // A tool call or record shown as a message: {"path": ...}, {"query": ...} and the like.
+    if (out[start] == '{' || (out[start] == '[' && start + 1 < out.size() && out[start + 1] == '{')) return {};
+    return out;
+}
+
 std::filesystem::path HomeFolder() {
     PWSTR path{};
     std::filesystem::path out;

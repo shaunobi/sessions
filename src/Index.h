@@ -130,6 +130,11 @@ public:
     std::vector<std::wstring> AllTags();
     // Every word must appear in the session's messages or its title.
     std::vector<SearchHit> Search(std::wstring const& query);
+    // A word that appears nowhere, replaced by the closest word that does (one or two
+    // letters off: "blendr" -> "blender"); the word itself when nothing is close.
+    std::wstring Correct(std::wstring const& word);
+    // Cleans ChatGPT web messages stored before CleanChatGptText existed (once).
+    void CleanStoredChatGptText();
     // Whether any of the query's words appears in any message at all.
     bool KnowsAnyWord(std::wstring const& query);
     // Snippet with \x01 ... \x02 around matched terms.
@@ -150,6 +155,8 @@ public:
     int CountSkipped(std::string const& reason);
 
 private:
+    std::unordered_map<std::wstring, std::wstring> corrections;  // Correct() results for this database
+    std::wstring Corrected(std::wstring const& word);
     Db db;
     void Migrate();
 };

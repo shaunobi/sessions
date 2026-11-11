@@ -51,7 +51,11 @@ bool Embedder::Load(std::wstring& problem) {
     else if (fs::exists(ExecutableFolder() / L"Model" / L"model.onnx")) folder = ExecutableFolder() / L"Model";
     std::string fileVocab;
     std::wstring modelFile;
-    if (!folder.empty()) {
+    if (folder.empty()) {
+        problem = L"Meaning search is off: the Model folder is missing beside Sessions.exe";
+        return false;
+    }
+    {
         modelFile = (folder / L"model.onnx").wstring();
         std::ifstream in(folder / L"vocab.txt", std::ios::binary);
         fileVocab.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -63,13 +67,9 @@ bool Embedder::Load(std::wstring& problem) {
             problem = L"Meaning search is off: no model.onnx and vocab.txt in " + folder.wstring();
             return false;
         }
-    } else {
-        name = BuiltInModelName;
     }
-    // Otherwise the model and vocabulary are embedded in the executable.
-    auto model = folder.empty() ? EmbeddedFile(IDR_MODEL) : std::string_view();
-    std::string_view vocab = folder.empty() ? EmbeddedFile(IDR_VOCAB) : std::string_view(fileVocab);
-    if ((folder.empty() && model.empty()) || vocab.empty()) {
+    std::string_view vocab(fileVocab);
+    if (vocab.empty()) {
         problem = L"Meaning search is off: this build has no embedding model";
         return false;
     }
@@ -93,8 +93,7 @@ bool Embedder::Load(std::wstring& problem) {
             // Leave cores for everything else on the machine.
             options.SetIntraOpNumThreads(4);
         }
-        runtime->session = modelFile.empty() ? Ort::Session(runtime->env, model.data(), model.size(), options)
-                                             : Ort::Session(runtime->env, modelFile.c_str(), options);
+        runtime->session = Ort::Session(runtime->env, modelFile.c_str(), options);
     };
     try {
         open(true);

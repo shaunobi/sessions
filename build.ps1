@@ -12,21 +12,10 @@ if (!$vs) { throw 'Install Visual Studio 2022 with Desktop development with C++ 
 $packages = Join-Path $BuildRoot 'packages'
 $nuget = Join-Path $BuildRoot 'tools\nuget.exe'
 if (!(Test-Path $nuget)) { New-Item -ItemType Directory -Force (Split-Path $nuget) | Out-Null; Invoke-WebRequest 'https://dist.nuget.org/win-x86-commandline/v6.14.0/nuget.exe' -OutFile $nuget }
-# Embedding model for meaning search: BGE small English v1.5 (MIT licence), pinned to one revision.
 $models = Join-Path $BuildRoot 'models'
 New-Item -ItemType Directory -Force $models | Out-Null
-$revision = '5c38ec7c405ec4b44b94cc5a9bb96e735b38267a'
-$modelFiles = @{
-    'bge-small-en-v1.5.onnx'      = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/$revision/onnx/model.onnx"
-    'bge-small-en-v1.5.vocab.txt' = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/$revision/vocab.txt"
-}
-foreach ($name in $modelFiles.Keys) {
-    $target = Join-Path $models $name
-    if (!(Test-Path $target)) { Invoke-WebRequest $modelFiles[$name] -OutFile $target }
-}
 # Meaning model shipped beside the executable (Model folder): Snowflake Arctic Embed M v1.5
-# (Apache 2.0), chosen by scoring candidates on real searches (qa-meaning). The built-in
-# BGE small model above is the fallback when the folder is missing.
+# (Apache 2.0), chosen by scoring candidates on real searches (qa-meaning).
 $arctic = Join-Path $models 'snowflake-arctic-embed-m-v1.5'
 $arcticRevision = 'e58a8f756156a1293d763f17e3aae643474e9b8a'
 New-Item -ItemType Directory -Force $arctic | Out-Null

@@ -48,6 +48,10 @@ std::wstring UpToDate(Index& index) {
 }
 
 IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback const& callback, HANDLE stop) {
+    try {
+        index.CleanStoredChatGptText();
+    } catch (std::exception const&) {
+    }
     IndexStatus status;
     status.state = IndexStatus::State::Scanning;
     status.message = L"Scanning";

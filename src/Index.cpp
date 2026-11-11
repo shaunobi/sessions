@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS chunks(
   PRIMARY KEY(message_id, chunk));
 CREATE INDEX IF NOT EXISTS chunks_hash ON chunks(hash);
 CREATE TABLE IF NOT EXISTS embeddings(hash INTEGER PRIMARY KEY, vector BLOB NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_vocab USING fts5vocab(messages_fts, 'row');
 CREATE TABLE IF NOT EXISTS title_vectors(
   session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   hash INTEGER NOT NULL,
@@ -392,7 +393,17 @@ FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
         }
         out.push_back(std::move(row));
     }
-    return out;
+    // One card per session: the same conversation can sit in two files (a rollout and
+    // its archived copy, say). Keep the most recent.
+    std::unordered_map<std::string, size_t> byKey;
+    std::vector<SessionRow> unique;
+    unique.reserve(out.size());
+    for (auto& row : out) {
+        auto [it, added] = byKey.try_emplace(row.key, unique.size());
+        if (added) unique.push_back(std::move(row));
+        else if (row.lastActivity > unique[it->second].lastActivity) unique[it->second] = std::move(row);
+    }
+    return unique;
 }
 
 std::vector<AccountRow> Index::Accounts() {
@@ -421,9 +432,103 @@ std::vector<std::wstring> Index::AllTags() {
     return out;
 }
 
+namespace {
+// Optimal string alignment distance (swapped neighbours count as one), stopping past `limit`.
+size_t Distance(std::wstring const& a, std::wstring const& b, size_t limit) {
+    if ((a.size() > b.size() ? a.size() - b.size() : b.size() - a.size()) > limit) return limit + 1;
+    std::vector<std::vector<size_t>> d(a.size() + 1, std::vector<size_t>(b.size() + 1));
+    for (size_t i = 0; i <= a.size(); ++i) d[i][0] = i;
+    for (size_t j = 0; j <= b.size(); ++j) d[0][j] = j;
+    for (size_t i = 1; i <= a.size(); ++i) {
+        size_t rowBest = limit + 1;
+        for (size_t j = 1; j <= b.size(); ++j) {
+            size_t cost = a[i - 1] == b[j - 1] ? 0 : 1;
+            d[i][j] = std::min({d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost});
+            if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]) d[i][j] = std::min(d[i][j], d[i - 2][j - 2] + 1);
+            rowBest = std::min(rowBest, d[i][j]);
+        }
+        if (rowBest > limit) return limit + 1;
+    }
+    return d[a.size()][b.size()];
+}
+}  // namespace
+
+void Index::CleanStoredChatGptText() {
+    if (MetaValue("chatgpt_text_clean") == "1") return;
+    Transaction transaction(db);
+    std::vector<std::pair<int64_t, std::string>> changed;
+    {
+        auto q = db.Prepare(R"sql(
+SELECT m.id, f.text FROM messages m JOIN messages_fts f ON f.rowid = m.id JOIN sessions s ON s.id = m.session_id
+WHERE s.family = 3 AND s.tool = ?1)sql");
+        q.Bind(1, int64_t(Tool::ChatGptWeb));
+        while (q.Step()) {
+            std::string text(q.Text(1));
+            auto clean = CleanChatGptText(text);
+            if (clean != text) changed.emplace_back(q.Int(0), std::move(clean));
+        }
+    }
+    auto drop = db.Prepare("DELETE FROM messages_fts WHERE rowid = ?1");
+    auto remove = db.Prepare("DELETE FROM messages WHERE id = ?1");
+    auto add = db.Prepare("INSERT INTO messages_fts(rowid, text) VALUES(?1, ?2)");
+    auto forget = db.Prepare("DELETE FROM chunks WHERE message_id = ?1");  // learned again from the clean text
+    for (auto const& [id, text] : changed) {
+        drop.Bind(1, id).Run();
+        forget.Bind(1, id).Run();
+        if (text.empty()) remove.Bind(1, id).Run();
+        else add.Bind(1, id).Bind(2, text).Run();
+    }
+    db.Exec(R"sql(UPDATE sessions SET message_count = (SELECT count(*) FROM messages m WHERE m.session_id = sessions.id)
+WHERE family = 3 AND tool = 8)sql");
+    SetMetaValue("chatgpt_text_clean", "1");
+    transaction.Commit();
+}
+
+std::wstring Index::Correct(std::wstring const& word) {
+    if (auto it = corrections.find(word); it != corrections.end()) return it->second;
+    if (corrections.size() > 2000) corrections.clear();
+    return corrections[word] = Corrected(word);
+}
+
+std::wstring Index::Corrected(std::wstring const& word) {
+    auto lower = Lower(word);
+    if (lower.size() < 4 || lower.find(L' ') != std::wstring::npos) return word;
+    for (wchar_t c : lower)
+        if (!iswalpha(c)) return word;
+    try {
+        auto known = db.Prepare("SELECT 1 FROM messages_fts WHERE messages_fts MATCH ?1 LIMIT 1");
+        known.Bind(1, Term(lower, false));
+        if (known.Step()) return word;
+        const size_t limit = lower.size() >= 6 ? 2 : 1;
+        // Words sharing the first letter (typos rarely change it), closest first, then most used.
+        std::wstring start = lower.substr(0, 1), end = start;
+        end.back() = wchar_t(end.back() + 1);
+        auto q = db.Prepare("SELECT term, doc FROM messages_vocab WHERE term >= ?1 AND term < ?2");
+        q.Bind(1, Utf8(start)).Bind(2, Utf8(end));
+        std::wstring best;
+        size_t bestDistance = limit + 1;
+        int64_t bestDocs = 0;
+        while (q.Step()) {
+            std::wstring term = q.WText(0);
+            if (term.size() + limit < lower.size() || term.size() > lower.size() + limit) continue;
+            size_t distance = Distance(lower, term, limit);
+            int64_t docs = q.Int(1);
+            if (distance < bestDistance || (distance == bestDistance && distance <= limit && docs > bestDocs)) {
+                best = term;
+                bestDistance = distance;
+                bestDocs = docs;
+            }
+        }
+        if (bestDistance <= limit && bestDocs >= 2) return best;
+    } catch (DbError const&) {
+    }
+    return word;
+}
+
 std::vector<SearchHit> Index::Search(std::wstring const& query) {
     auto words = KeywordWords(query);
     if (words.empty()) return {};
+    for (auto& word : words) word = Correct(word);
 
     std::unordered_map<int64_t, std::wstring> titles;
     {
@@ -531,6 +636,7 @@ bool Index::KnowsAnyWord(std::wstring const& query) {
 std::wstring Index::Snippet(std::wstring const& query, int64_t message) {
     auto words = KeywordWords(query);
     if (words.empty() || !message) return {};
+    for (auto& word : words) word = Correct(word);
     std::string any;
     for (size_t i = 0; i < words.size(); ++i)
         any += (any.empty() ? "" : " OR ") + Term(words[i], i + 1 == words.size() && words[i].size() >= 2);

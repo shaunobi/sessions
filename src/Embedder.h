@@ -13,8 +13,6 @@
 namespace sessions {
 
 constexpr size_t ChunkTokens = 254;  // plus [CLS] and [SEP]
-// The model built into the executable, used when no model folder is installed.
-constexpr char const* BuiltInModelName = "bge-small-en-v1.5";
 
 class Embedder {
 public:
@@ -30,8 +28,8 @@ public:
     std::string const& Name() const { return name; }
     // Where a model is looked for, in order: the folder named by the
     // SESSIONS_MODEL environment variable, then a Model folder beside the
-    // executable. Each holds model.onnx (+ model.onnx_data) and vocab.txt; the
-    // folder's name is the model's name. Otherwise the built-in model.
+    // executable. Each holds model.onnx and vocab.txt; name.txt or else the
+    // folder's name is the model's name.
     std::wstring const& Device() const { return device; }
 
     // Each input is a list of word-piece ids (at most ChunkTokens). Returns one

@@ -63,7 +63,9 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
 
     std::vector<std::pair<int64_t, Best>> meaning;
     std::vector<float> all;  // every session's meaning score, for this query's spread
-    if (auto embedder = Embedder::Shared()) {
+    // A quoted phrase asks for those exact words: no similar-meaning results.
+    const bool exact = query.find(L'"') != std::wstring::npos || query.find(L'“') != std::wstring::npos;
+    if (auto embedder = exact ? nullptr : Embedder::Shared()) {
         Refresh();
         auto q = pieces.empty() ? std::vector<float>() : embedder->EmbedQuery(Utf8(query));
         if (!pieces.empty() && q.size() == dims) {

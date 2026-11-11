@@ -176,7 +176,11 @@ constexpr wchar_t ChatGpt[] = LR"JS(
       const cacheKey = 'sessions-list-' + account;
       let cached = null;
       try { cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null'); } catch (e) {}
-      if (cached && Date.now() - cached.at < 30 * 60 * 1000) {
+      // Sessions has the rest: list only what changed since its newest chat (a day's margin).
+      const partial = !sessionsHint.full && sessionsHint.since > 0;
+      const since = (sessionsHint.since || 0) - 24 * 3600 * 1000;
+      const older = (list) => list.length && list.every((c) => new Date(toIso(c.update_time)).getTime() < since);
+      if (cached && Date.now() - cached.at < 30 * 60 * 1000 && (partial || cached.full)) {
         items = cached.items; projectOf = cached.projectOf;
       } else {
       post({ type: 'status', text: 'ChatGPT · listing' });
@@ -186,7 +190,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           const list = page.items || [];
           for (const c of list) items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time), created: toIso(c.create_time), title: c.title || '' });
           post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
-          if (list.length < 100 || offset > 50000) break;
+          if (list.length < 100 || offset > 50000 || (partial && older(list))) break;
           await sleep(300);
         }
       }
@@ -209,17 +213,17 @@ constexpr wchar_t ChatGpt[] = LR"JS(
               projectOf[c.id] = name;
             }
             post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
-            if (!list.length) break;
+            if (!list.length || (partial && older(list))) break;
             cursor = page.cursor;
             await sleep(300);
           }
         }
       } catch (e) { if (e.signedOut) throw e; post({ type: 'error', text: 'ChatGPT projects: ' + e.message }); }
-      try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf })); } catch (e) {}
+      try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf, full: !partial })); } catch (e) {}
       }
 
       { const seen = new Set(); items = items.reverse().filter((x) => !seen.has(x.id) && seen.add(x.id)).reverse(); }
-      const ids = await askWhichToFetch({ type: 'list', account, accountName: acct.name, complete: true, items });
+      const ids = await askWhichToFetch({ type: 'list', account, accountName: acct.name, complete: !partial, items });
       let n = 0;
       for (const full of ids) {
         const id = full.replace(/^chatgpt:/, '');
