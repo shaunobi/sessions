@@ -271,9 +271,15 @@ ParsedSession ParseAntigravityDesktop(fs::path const& file) {
         // Field 1 is the trajectory id; the file name is the conversation id that titles and links use.
         if (field.number == 2 && field.wire == 2) ReadStep(field.bytes, session);
     }
+    bool fromYou = false;
+    for (auto const& m : session.messages) fromYou = fromYou || m.role == Role::User;
     if (session.messages.empty()) {
         session.skip = true;
         session.skipReason = "no conversation";
+    } else if (!fromYou) {
+        // A helper started by another conversation (for example a review agent): no message of yours.
+        session.skip = true;
+        session.skipReason = "helper";
     }
     return session;
 }
@@ -295,9 +301,15 @@ ParsedSession ParseAntigravityCli(fs::path const& file) {
         session.skipReason = "unreadable";
         return session;
     }
+    bool fromYou = false;
+    for (auto const& m : session.messages) fromYou = fromYou || m.role == Role::User;
     if (session.messages.empty()) {
         session.skip = true;
         session.skipReason = "no conversation";
+    } else if (!fromYou) {
+        // A helper started by another conversation (for example a review agent): no message of yours.
+        session.skip = true;
+        session.skipReason = "helper";
     }
     return session;
 }

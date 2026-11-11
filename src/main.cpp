@@ -274,7 +274,7 @@ constexpr wchar_t ShellMarkup[] = LR"(
     </SplitView.Pane>
     <Grid>
       <Grid.RowDefinitions><RowDefinition Height='Auto'/><RowDefinition Height='Auto'/><RowDefinition Height='*'/></Grid.RowDefinitions>
-      <TextBox x:Name='Search' Margin='24,4,24,10' PlaceholderText='Search what you or the AI said' AutomationProperties.Name='Search sessions'/>
+      <TextBox x:Name='Search' Margin='24,4,24,10' PlaceholderText='Search what you or the AI said' AutomationProperties.Name='Search sessions' IsSpellCheckEnabled='False'/>
       <Grid Grid.Row='1' Margin='24,0,24,10' ColumnSpacing='8'>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width='Auto'/><ColumnDefinition Width='Auto'/><ColumnDefinition Width='Auto'/><ColumnDefinition Width='Auto'/><ColumnDefinition Width='*'/>
@@ -828,6 +828,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                                  std::to_wstring(row.lastActivity) + L"\x1F" + std::to_wstring(int(row.tool)) + L"\x1F" + snippet +
                                  (row.archived ? L"\x1F" L"a" : L"");
         for (auto const& tag : row.tags) signature += L"\x1F#" + tag;
+        if (sortBox && sortBox.SelectedIndex() == 2) signature += L"\x1F" L"created";  // cards show the start date
         auto& cached = cardCache[row.id];
         if (!cached.element) {
             cached.element = Border();
@@ -902,7 +903,9 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             meta.Children().Append(block);
             return block;
         };
-        std::wstring when = FriendlyDate(row.lastActivity) + L"  \u00B7  " + Number(row.messages) +
+        const bool byCreated = sortBox && sortBox.SelectedIndex() == 2 && row.created > 0;
+        std::wstring when = (byCreated ? L"Started " + FriendlyDate(row.created) : FriendlyDate(row.lastActivity)) + L"  \u00B7  " +
+                            Number(row.messages) +
                             (row.messages == 1 ? L" message" : L" messages");
         if (row.archived) when += L"  \u00B7  archived";
         auto dateLine = line(L"");
@@ -1263,7 +1266,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
   <Border Grid.Row='1' x:Name='Panel' Width='780' HorizontalAlignment='Center' CornerRadius='12' Padding='14'
           Background='{ThemeResource SolidBackgroundFillColorBaseBrush}' BorderBrush='{ThemeResource SurfaceStrokeColorDefaultBrush}' BorderThickness='1'>
     <StackPanel Spacing='10'>
-      <TextBox x:Name='QuickBox' FontSize='22' PlaceholderText='Find a conversation' AutomationProperties.Name='Find a conversation'/>
+      <TextBox x:Name='QuickBox' FontSize='22' PlaceholderText='Find a conversation' AutomationProperties.Name='Find a conversation' IsSpellCheckEnabled='False'/>
       <ListView x:Name='QuickList' SelectionMode='Single' IsItemClickEnabled='True' MaxHeight='620'>
         <ListView.ItemContainerStyle>
           <Style TargetType='ListViewItem'>

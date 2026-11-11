@@ -57,7 +57,7 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
     bool changed = false;
     // When the way transcripts are read changes, re-read everything. Meaning
     // vectors are kept by content, so unchanged text is not embedded again.
-    constexpr char const* ParserVersion = "3";
+    constexpr char const* ParserVersion = "4";
     const bool reparse = index.MetaValue("parser_version") != ParserVersion;
     if (request.forgetAll || reparse || !request.forgetAccounts.empty()) {
         Transaction transaction(index.Database());
@@ -232,7 +232,7 @@ void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, 
     status.state = IndexStatus::State::Indexing;
     status.total = pending;
     auto lastReport = Clock::now() - std::chrono::seconds(1);
-    constexpr size_t maxChunksPerMessage = 8;
+    constexpr size_t maxChunksPerMessage = 24;
     constexpr size_t batchSize = 32;
     for (;;) {
         if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;

@@ -642,8 +642,14 @@ void Index::RenameAccount(std::string const& account, std::wstring const& name) 
 }
 
 void Index::AddTag(std::string const& key, std::wstring const& tag) {
+    // Reuse an existing tag's spelling when only capitals differ.
+    std::string name = Utf8(tag);
+    auto existing = db.Prepare("SELECT tag FROM tags WHERE tag = ?1 COLLATE NOCASE LIMIT 1");
+    existing.Bind(1, name);
+    if (existing.Step()) name = std::string(existing.Text(0));
+    existing.Reset();
     auto q = db.Prepare("INSERT OR IGNORE INTO tags(session_key, tag) VALUES(?1, ?2)");
-    q.Bind(1, key).Bind(2, Utf8(tag)).Run();
+    q.Bind(1, key).Bind(2, name).Run();
 }
 
 void Index::RemoveTag(std::string const& key, std::wstring const& tag) {
