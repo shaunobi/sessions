@@ -105,7 +105,8 @@ constexpr wchar_t Claude[] = LR"JS(
       }
       const ids = await askWhichToFetch({
         type: 'list', account, accountName: org.name || '', complete: true,
-        items: items.map((c) => ({ id: 'claude:' + c.uuid, updated: toIso(c.updated_at) })),
+        items: items.map((c) => ({ id: 'claude:' + c.uuid, updated: toIso(c.updated_at), created: toIso(c.created_at),
+                                   title: c.name || '', project: (c.project && c.project.name) || '' })),
       });
       let n = 0;
       for (const full of ids) {
@@ -177,7 +178,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
         for (let offset = 0; ; offset += 100) {
           const page = await getJson('/backend-api/conversations?offset=' + offset + '&limit=100&order=updated&is_archived=' + archived, { headers });
           const list = page.items || [];
-          for (const c of list) items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time) });
+          for (const c of list) items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time), created: toIso(c.create_time), title: c.title || '' });
           post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
           if (list.length < 100 || offset > 50000) break;
           await sleep(300);
@@ -198,7 +199,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
             const page = await getJson('/backend-api/gizmos/' + g.id + '/conversations?cursor=' + encodeURIComponent(cursor), { headers });
             const list = page.items || [];
             for (const c of list) {
-              items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time) });
+              items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time), created: toIso(c.create_time), title: c.title || '', project: name });
               projectOf[c.id] = name;
             }
             post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
@@ -211,7 +212,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
       try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf })); } catch (e) {}
       }
 
-      { const seen = new Set(); items = items.filter((x) => !seen.has(x.id) && seen.add(x.id)); }
+      { const seen = new Set(); items = items.reverse().filter((x) => !seen.has(x.id) && seen.add(x.id)).reverse(); }
       const ids = await askWhichToFetch({ type: 'list', account, accountName: acct.name, complete: true, items });
       let n = 0;
       for (const full of ids) {
@@ -295,7 +296,7 @@ constexpr wchar_t Gemini[] = LR"JS(
       const chats = (res && Array.isArray(res[2]) ? res[2] : []).filter((c) => Array.isArray(c) && typeof c[0] === 'string');
       for (const c of chats) {
         const updated = seconds(c[5]) || seconds(c[4]) || '';
-        items.push({ id: 'gemini:' + c[0], updated });
+        items.push({ id: 'gemini:' + c[0], updated, created: updated, title: c[1] || '' });
         titles[c[0]] = c[1] || '';
       }
       cursor = res && typeof res[1] === 'string' && res[1] ? res[1] : null;

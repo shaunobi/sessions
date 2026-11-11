@@ -905,8 +905,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         };
         const bool byCreated = sortBox && sortBox.SelectedIndex() == 2 && row.created > 0;
         std::wstring when = (byCreated ? L"Started " + FriendlyDate(row.created) : FriendlyDate(row.lastActivity)) + L"  \u00B7  " +
-                            Number(row.messages) +
-                            (row.messages == 1 ? L" message" : L" messages");
+                            (row.messages == 0 ? std::wstring(L"name only, messages not read yet")
+                                               : Number(row.messages) + (row.messages == 1 ? L" message" : L" messages"));
         if (row.archived) when += L"  \u00B7  archived";
         auto dateLine = line(L"");
         // Date and size first, then the folder, so a long folder name is what gets cut short.

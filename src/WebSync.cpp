@@ -375,6 +375,7 @@ void WebSync::OnMessage(std::wstring const& text) {
         const int batch = current->tool == Tool::ChatGptWeb ? 120 : 200;
         int wanted = 0;
         auto known = index.KnownWeb(account);
+        std::vector<WebConversation> stubs;  // listed but never stored: shown by name now, read later
         std::vector<std::string> present;
         std::string ids = "{\"type\":\"fetch\",\"ids\":[";
         bool first = true;
@@ -386,6 +387,19 @@ void WebSync::OnMessage(std::wstring const& text) {
                 int64_t updated = ParseIsoMs(item.Str("updated"));
                 if (updated) listedUpdated[id] = updated;
                 auto it = known.find(id);
+                if (it == known.end()) {
+                    WebConversation stub;
+                    stub.tool = current->tool;
+                    stub.id = id;
+                    stub.account = account;
+                    stub.title = Squash(item.Str("title"));
+                    stub.folder = item.Str("project");
+                    stub.created = ParseIsoMs(item.Str("created"));
+                    stub.updated = updated ? updated : stub.created;
+                    if (!stub.created) stub.created = stub.updated;
+                    stub.titleOnly = true;
+                    stubs.push_back(std::move(stub));
+                }
                 // Read conversations that are new or changed since the last sync.
                 if (it == known.end() || (updated && it->second != updated)) {
                     if (++wanted > batch) {
@@ -395,6 +409,16 @@ void WebSync::OnMessage(std::wstring const& text) {
                     ids += (first ? "" : ",") + JsonString(id);
                     first = false;
                 }
+            }
+        }
+        if (!stubs.empty()) {
+            try {
+                Transaction transaction(index.Database());
+                for (auto const& stub : stubs) index.StoreWeb(stub);
+                transaction.Commit();
+                changed = true;
+                report(L"", true, false);  // the new names show straight away
+            } catch (...) {
             }
         }
         if (auto complete = message.Get("complete"); complete && complete->IsTrue()) {

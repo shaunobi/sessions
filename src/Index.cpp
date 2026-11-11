@@ -281,7 +281,7 @@ void Index::StoreWeb(WebConversation const& c) {
     file.path = Wide("web:" + c.id);
     file.family = Family::Web;
     file.size = int64_t(c.messages.size());
-    file.modified = c.updated;
+    file.modified = c.titleOnly ? 0 : c.updated;
     ParsedSession parsed;
     parsed.tool = c.tool;
     parsed.externalId = c.id;
@@ -295,7 +295,7 @@ void Index::StoreWeb(WebConversation const& c) {
             parsed.firstPrompt = Clip(Squash(m.text), 300);
             break;
         }
-    if (parsed.messages.empty()) {
+    if (parsed.messages.empty() && !c.titleOnly) {
         parsed.skip = true;
         parsed.skipReason = "no conversation";
     }

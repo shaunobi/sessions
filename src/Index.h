@@ -67,6 +67,9 @@ struct WebConversation {
     int64_t created = 0;
     int64_t updated = 0;
     std::vector<Message> messages;
+    // Known from the site's list only (title and dates); the messages are read
+    // later. Stored with no version, so the next sync still reads it.
+    bool titleOnly = false;
 };
 
 struct KnownFile {
