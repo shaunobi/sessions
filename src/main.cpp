@@ -2,6 +2,7 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <shcore.h>
+#include <commdlg.h>
 #undef GetCurrentTime
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -39,6 +40,7 @@
 #include "Embedder.h"
 #include "Launch.h"
 #include "Search.h"
+#include "ChatGptImport.h"
 #include "Text.h"
 #include "TrayIcon.h"
 #include "WebSync.h"
@@ -258,6 +260,13 @@ constexpr wchar_t ShellMarkup[] = LR"(
                      Text='Sign in once per site. A window opens on the site; sign in as usual and it closes by itself, then the chats come in. Sessions never sees your password. Your chats stay in sync every 30 minutes while Sessions is open.'/>
           <StackPanel x:Name='WebSites' Spacing='8'/>
           <HyperlinkButton x:Name='SyncWeb' Content='Check all sites again now' Padding='0,2'/>
+          <TextBlock TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' Margin='0,4,0,0'
+                     Text='ChatGPT lets Sessions open only so many chats an hour, so a long history fills in slowly. To load it all at once, ask ChatGPT for your data (Settings, Data controls, Export data), then choose the zip it emails you.'/>
+          <StackPanel Orientation='Horizontal' Spacing='8'>
+            <Button x:Name='ImportChatGpt' Content='Load a ChatGPT export'/>
+            <TextBlock x:Name='ImportInfo' VerticalAlignment='Center' FontSize='12' TextWrapping='Wrap' MaxWidth='240'
+                       Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
+          </StackPanel>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
           <TextBlock x:Name='IndexInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <StackPanel Orientation='Horizontal' Spacing='8'>
@@ -483,6 +492,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             if (indexer) indexer->RebuildAll();
             split.IsPaneOpen(false);
         });
+        Named<Button>(shell, L"ImportChatGpt").Click([this](auto&&, auto&&) { ImportChatGpt(); });
         Named<Button>(shell, L"OpenFolder").Click([this](auto&&, auto&&) { sessions::RevealFile(databaseFile.wstring()); });
 
         AddShortcut(winrt::Windows::System::VirtualKey::F, winrt::Windows::System::VirtualKeyModifiers::Control, [this] {
@@ -581,6 +591,62 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             if (webSync && !closing) webSync->SyncAll();
         });
         webTimer.Start();
+    }
+
+    // ---- ChatGPT export -------------------------------------------------------
+
+    std::thread importer;
+    void ImportChatGpt() {
+        if (importer.joinable()) return;  // one at a time
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        wchar_t file[MAX_PATH * 4] = L"";
+        OPENFILENAMEW dialog{sizeof(dialog)};
+        dialog.hwndOwner = handle;
+        dialog.lpstrFilter = L"ChatGPT export (*.zip; conversations.json)\0*.zip;*.json\0All files\0*.*\0";
+        dialog.lpstrFile = file;
+        dialog.nMaxFile = DWORD(std::size(file));
+        dialog.lpstrTitle = L"Choose the ChatGPT export zip";
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&dialog)) return;
+        auto info = Named<TextBlock>(shell, L"ImportInfo");
+        auto button = Named<Button>(shell, L"ImportChatGpt");
+        info.Text(L"Reading the export\u2026");
+        button.IsEnabled(false);
+        auto queue = window.DispatcherQueue();
+        auto weak = get_weak();
+        std::filesystem::path source = file;
+        auto say = [queue, weak](std::wstring text) {
+            queue.TryEnqueue([weak, text] {
+                if (auto app = weak.get(); app && !app->closing) {
+                    Named<TextBlock>(app->shell, L"ImportInfo").Text(text);
+                    app->webMessage = text;
+                    app->ShowCombinedStatus();
+                }
+            });
+        };
+        importer = std::thread([this, queue, weak, source, say] {
+            sessions::ImportResult result;
+            try {
+                result = sessions::ImportChatGptExport(databaseFile, source, say);
+            } catch (std::exception const& e) {
+                result.problem = L"Could not load it: " + sessions::Wide(e.what());
+            }
+            queue.TryEnqueue([weak, result] {
+                auto app = weak.get();
+                if (!app || app->closing) return;
+                app->importer.join();
+                std::wstring text = result.conversations
+                                        ? L"Loaded " + Number(result.conversations) + L" ChatGPT chats from the export."
+                                        : result.problem;
+                Named<TextBlock>(app->shell, L"ImportInfo").Text(text);
+                Named<Button>(app->shell, L"ImportChatGpt").IsEnabled(true);
+                app->webMessage.clear();
+                app->ShowCombinedStatus();
+                app->Reload();
+                if (app->indexer) app->indexer->Rescan();  // learn the meaning of the new messages
+            });
+        });
     }
 
     // ---- Window placement ---------------------------------------------------
@@ -1869,6 +1935,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             int code = RunWebSyncHeadless(argc, argv);
             LocalFree(argv);
             return code;
+        }
+        if (arg == L"--import-chatgpt" && i + 1 < argc) {
+            std::filesystem::path database = sessions::Index::DefaultFile();
+            for (int j = 1; j + 1 < argc; ++j)
+                if (std::wstring_view(argv[j]) == L"--db") database = argv[j + 1];
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            auto print = [](std::wstring const& text) {
+                auto utf8 = sessions::Utf8(text + L"\n");
+                DWORD written;
+                WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), utf8.data(), DWORD(utf8.size()), &written, nullptr);
+            };
+            auto result = sessions::ImportChatGptExport(database, argv[i + 1], print);
+            print(L"imported " + std::to_wstring(result.conversations) + L", skipped " + std::to_wstring(result.skipped) +
+                  (result.problem.empty() ? L"" : L" \u00B7 " + result.problem));
+            LocalFree(argv);
+            return result.conversations || result.problem.empty() ? 0 : 1;
         }
         if (arg == L"--index" || arg == L"--search") {
             int code = RunHeadless(argc, argv);

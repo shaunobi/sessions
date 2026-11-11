@@ -300,7 +300,8 @@ void Index::StoreWeb(WebConversation const& c) {
         parsed.skipReason = "no conversation";
     }
     Store(file, parsed);
-    auto folder = db.Prepare("UPDATE sessions SET folder = ?2 WHERE path = ?1");
+    // An export or list without project names keeps the one already known.
+    auto folder = db.Prepare("UPDATE sessions SET folder = ?2 WHERE path = ?1 AND ?2 != ''");
     folder.Bind(1, Utf8(file.path.wstring())).Bind(2, c.folder).Run();
 }
 
