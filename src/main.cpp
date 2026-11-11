@@ -1521,15 +1521,31 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         for (auto const& site : webSync->Statuses()) {
             std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : sessions::ToolName(site.tool);
             std::wstring now = webSync->Live(site.tool);
+            // Signed in if the check running now says so, otherwise per the last finished check.
+            const bool signedIn = webSync->SignedInNow(site.tool) || (now.empty() || now.rfind(L"Waiting", 0) == 0 || now.rfind(L"Next", 0) == 0
+                                                                          ? site.signedIn
+                                                                          : false) ||
+                                  (!now.empty() && site.signedIn);
+            const bool unreachable = site.problem.find(L"could not reach") != std::wstring::npos ||
+                                     site.problem.find(L"stopped answering") != std::wstring::npos;
             std::wstring text;
-            if (!now.empty()) text = now;
-            else if (!site.checked) text = L"Not signed in yet.";
-            else if (site.signedIn) text = L"Signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L".";
-            else if (site.problem.find(L"could not reach") != std::wstring::npos || site.problem.find(L"stopped answering") != std::wstring::npos)
-                text = L"Couldn't reach the site last time; it will try again.";
-            else text = L"Not signed in.";
+            bool needsYou = false;
+            if (!now.empty()) {
+                text = now + L".";
+                if (signedIn && now.rfind(L"Signed in", 0) != 0) text = L"Signed in. " + text;
+            } else if (!site.checked) {
+                text = L"Not signed in yet. Press Sign in.";
+                needsYou = true;
+            } else if (site.signedIn) {
+                text = L"Signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L". Nothing to do.";
+            } else if (unreachable) {
+                text = L"The site didn't answer at the last check. Nothing to do; Sessions tries again by itself.";
+            } else {
+                text = L"Not signed in. Press Sign in.";
+                needsYou = true;
+            }
             if (now.empty() && site.chats) text += L" " + Number(site.chats) + (site.chats == 1 ? L" chat in Sessions." : L" chats in Sessions.");
-            if (now.empty() && site.checkedAt > 0) text += L" Checked " + FriendlyDate(site.checkedAt) + L".";
+            if (now.empty() && site.checkedAt > 0) text += L" Last checked " + FriendlyDate(site.checkedAt) + L".";
 
             Border card;
             card.CornerRadius({8, 8, 8, 8});
@@ -1556,7 +1572,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             state.Text(text);
             state.FontSize(12);
             state.TextWrapping(TextWrapping::Wrap);
-            state.Foreground(ThemeBrush(site.signedIn || !now.empty() ? L"TextFillColorSecondaryBrush" : L"SystemFillColorCautionBrush"));
+            state.Foreground(ThemeBrush(needsYou ? L"SystemFillColorCautionBrush" : L"TextFillColorSecondaryBrush"));
             if (!site.problem.empty()) ToolTipService::SetToolTip(state, box_value(site.problem));
             words.Children().Append(state);
             row.Children().Append(words);
@@ -1566,10 +1582,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             actions.VerticalAlignment(VerticalAlignment::Center);
             Grid::SetColumn(actions, 2);
             Button signIn;
-            signIn.Content(box_value(site.signedIn ? L"Switch" : L"Sign in"));
-            if (!site.signedIn) signIn.Style(Application::Current().Resources().Lookup(box_value(L"AccentButtonStyle")).as<Style>());
+            // The button matches the state: "Sign in" (highlighted) only when something
+            // is needed; otherwise "Switch account" for using a different account.
+            signIn.Content(box_value(signedIn ? L"Switch account" : L"Sign in"));
+            if (needsYou) signIn.Style(Application::Current().Resources().Lookup(box_value(L"AccentButtonStyle")).as<Style>());
             auto tool = site.tool;
-            signIn.Click([this, tool, signedIn = site.signedIn](auto&&, auto&&) {
+            signIn.Click([this, tool, signedIn](auto&&, auto&&) {
                 if (signedIn) {
                     // Switching account: sign out first so the site shows its account chooser.
                     webSync->SignOut(tool, [this, tool](std::wstring) {
@@ -1580,7 +1598,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 }
             });
             actions.Children().Append(signIn);
-            if (site.signedIn) {
+            if (signedIn) {
                 HyperlinkButton out;
                 out.Content(box_value(L"Sign out"));
                 out.Padding({4, 0, 4, 0});
@@ -1610,7 +1628,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void ShowCombinedStatus() {
-        std::wstring text = webMessage.empty() ? indexMessage : L"Syncing " + webMessage;
+        std::wstring text = webMessage.empty() ? indexMessage : L"Syncing web chats \u00B7 " + webMessage;
         statusText.Text(text);
         tray.SetTip((L"Sessions \u00B7 " + text).c_str());
         ToolTipService::SetToolTip(statusText, box_value(text));

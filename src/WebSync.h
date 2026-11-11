@@ -38,6 +38,8 @@ public:
     void Sync(std::optional<Tool> only);
     // What is happening with this site right now ("Reading chats · 42 so far"), or empty.
     std::wstring Live(Tool tool) const;
+    // Signed in according to the check running right now (before it is saved).
+    bool SignedInNow(Tool tool) const;
     bool Running() const { return running; }
     // What Settings shows for each site, from the last check (kept across restarts).
     struct SiteStatus {

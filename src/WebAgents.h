@@ -37,7 +37,7 @@ async function getJson(url, init) {
     // Too many requests: back off well before trying again. The site's limit is shared
     // with your own browser, so pressing on would also stop chats loading for you.
     if (r.status === 429) {
-      post({ type: 'status', text: 'The site asked Sessions to slow down; pausing' });
+      post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; pausing a moment' });
       await sleep(30000 * (attempt + 1));
       continue;
     }

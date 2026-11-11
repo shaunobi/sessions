@@ -172,6 +172,11 @@ void CALLBACK WebSync::CloseSignIn(HWND, UINT, UINT_PTR id, DWORD) {
     if (self->signIn) self->signIn->Hide();
 }
 
+bool WebSync::SignedInNow(Tool tool) const {
+    auto it = outcomes.find(tool);
+    return it != outcomes.end() && it->second.signedIn;
+}
+
 std::wstring WebSync::Live(Tool tool) const {
     auto it = live.find(tool);
     return it == live.end() ? std::wstring() : it->second;
@@ -192,7 +197,7 @@ void WebSync::Sync(std::optional<Tool> only) {
             if (it->tool == *only) rest.push_front(&*it);
         queue = std::move(rest);
         outcomes.erase(*only);
-        live[*only] = L"Waiting to sync";
+        live[*only] = L"Next to sync";
         report(L"", false, false);
         return;
     }
@@ -202,7 +207,10 @@ void WebSync::Sync(std::optional<Tool> only) {
     seenAccounts.clear();
     queue.clear();
     for (auto const& s : Services)
-        if (!only || s.tool == *only) queue.push_back(&s);
+        if (!only || s.tool == *only) {
+            queue.push_back(&s);
+            live[s.tool] = L"Waiting its turn to sync";
+        }
     activeSync = this;
     if (!watchdog) watchdog = SetTimer(nullptr, 0, 15000, Watchdog);
     if (!worker) {
@@ -233,7 +241,7 @@ void WebSync::Next() {
     }
     current = queue.front();
     queue.pop_front();
-    if (!live.count(current->tool) || live[current->tool] == L"Waiting to sync") live[current->tool] = L"Checking sign-in";
+    if (!SignedInNow(current->tool)) live[current->tool] = L"Checking sign-in";
     injected = false;
     stored = 0;
     failures = 0;
