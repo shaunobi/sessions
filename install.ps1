@@ -20,7 +20,7 @@ if ($running) {
 New-Item -ItemType Directory -Force $InstallFolder | Out-Null
 # Mirror: files from older builds are removed. The database and the Browser folder (web sign-ins)
 # are never touched: mirroring once deleted Browser on every install, signing you out of every site.
-robocopy $source $InstallFolder /MIR /XD Browser /XF Sessions.db Sessions.db-wal Sessions.db-shm *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy $source $InstallFolder /MIR /XD Browser Browser2 /XF Sessions.db Sessions.db-wal Sessions.db-shm *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Copy failed (robocopy exit $LASTEXITCODE)." }
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in 'Programs', 'DesktopDirectory') {

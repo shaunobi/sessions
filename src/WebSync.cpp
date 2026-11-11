@@ -63,12 +63,20 @@ static WebSync::Service const Services[] = {
      Family::Web},
 };
 
-namespace {
-std::wstring MetaKey(Tool tool) { return L"web_status_" + std::to_wstring(int(tool)); }
+std::wstring WebSync::Key(std::wstring const& base, Tool tool) const {
+    return base + std::to_wstring(int(tool)) + (slot > 1 ? L"_" + std::to_wstring(slot) : L"");
 }
 
-WebSync::WebSync(Index& database, Report onReport, std::filesystem::path profile) : index(database), report(std::move(onReport)) {
-    WebBrowser::SetProfileFolder(profile.empty() ? ExecutableFolder() / L"Browser" : profile);
+std::unique_ptr<WebBrowser> WebSync::NewBrowser() {
+    auto browser = std::make_unique<WebBrowser>();
+    if (!profile.empty()) browser->UseProfile(profile);
+    return browser;
+}
+
+WebSync::WebSync(Index& database, Report onReport, std::filesystem::path folder, int number)
+    : index(database), report(std::move(onReport)), slot(number) {
+    if (slot > 1) profile = folder;
+    else WebBrowser::SetProfileFolder(folder.empty() ? ExecutableFolder() / L"Browser" : folder);
 }
 
 WebSync::~WebSync() {
@@ -83,7 +91,7 @@ void WebSync::SignIn(Tool tool) {
     if (!service) return;
     std::wstring url = service->signInUrl;
     if (!signIn) {
-        signIn = std::make_unique<WebBrowser>();
+        signIn = NewBrowser();
         signIn->OnClosed([this] {
             if (closeTimer) KillTimer(nullptr, closeTimer);
             closeTimer = 0;
@@ -103,7 +111,8 @@ void WebSync::SignIn(Tool tool) {
                     }
                 // Past the sign-in pages: sync this site right away and close the
                 // window shortly after, so there is nothing more to do.
-                signIn->SetTitle(L"Sessions \u00B7 signed in to " + std::wstring(s.name) + L" \u2014 syncing; this window closes itself");
+                signIn->SetTitle(L"Sessions \u00B7 signed in to " + std::wstring(s.name) + (slot > 1 ? L" (second account)" : L"") +
+                                 L" \u2014 syncing; this window closes itself");
                 Sync(s.tool);
                 activeSync = this;
                 if (closeTimer) KillTimer(nullptr, closeTimer);
@@ -111,7 +120,7 @@ void WebSync::SignIn(Tool tool) {
                 return;
             }
         });
-        signIn->Create(L"Sessions · sign in", true, [this, url](bool ok) {
+        signIn->Create(slot > 1 ? L"Sessions · sign in to a second ChatGPT account" : L"Sessions · sign in", true, [this, url](bool ok) {
             if (ok) signIn->Navigate(url);
             else report(L"Could not start the sign-in browser (Microsoft Edge WebView2 is missing).", false, true);
         });
@@ -140,8 +149,8 @@ void WebSync::SignOut(Tool tool, std::function<void(std::wstring)> done) {
     }
     auto finish = [this, tool, name, done](int deleted) {
         // Forget the remembered status so Settings doesn't show the old account.
-        try { index.SetMetaValue(Utf8(L"web_status_" + std::to_wstring(int(tool))), ""); } catch (...) {}
-        if (tool == Tool::ChatGptWeb || tool == Tool::Gemini)
+        try { index.SetMetaValue(Utf8(Key(L"web_status_", tool)), ""); } catch (...) {}
+        if (slot == 1 && (tool == Tool::ChatGptWeb || tool == Tool::Gemini))
             for (auto other : {Tool::ChatGptWeb, Tool::Gemini})
                 if (other != tool) try { index.SetMetaValue(Utf8(L"web_status_" + std::to_wstring(int(other))), ""); } catch (...) {}
         done(deleted ? L"Signed out of " + name + L". Press its button to sign in with the account you want."
@@ -154,7 +163,7 @@ void WebSync::SignOut(Tool tool, std::function<void(std::wstring)> done) {
         return;
     }
     if (!worker) {
-        worker = std::make_unique<WebBrowser>();
+        worker = NewBrowser();
         worker->OnMessage([this](std::wstring const& json) { OnMessage(json); });
         worker->OnLoaded([this](bool ok, std::wstring const& url) { OnLoaded(ok, url); });
     }
@@ -211,14 +220,14 @@ void WebSync::Sync(std::optional<Tool> only) {
     listedUpdated.clear();
     queue.clear();
     for (auto const& s : Services)
-        if (!only || s.tool == *only) {
+        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb)) {
             queue.push_back(&s);
             live[s.tool] = L"Waiting its turn to sync";
         }
     activeSync = this;
     if (!watchdog) watchdog = SetTimer(nullptr, 0, 15000, Watchdog);
     if (!worker) {
-        worker = std::make_unique<WebBrowser>();
+        worker = NewBrowser();
         worker->OnMessage([this](std::wstring const& json) { OnMessage(json); });
         worker->OnLoaded([this](bool ok, std::wstring const& url) { OnLoaded(ok, url); });
         worker->Create(L"Sessions · sync", false, [this](bool ok) {
@@ -298,7 +307,7 @@ void WebSync::SaveOutcomes() {
                              (outcome.signedIn && outcome.problem.rfind(L"not signed in", 0) == 0 ? std::wstring() : outcome.problem) +
                              L"\x1F" + std::to_wstring(NowMs());
         try {
-            index.SetMetaValue(Utf8(MetaKey(tool)), Utf8(value));
+            index.SetMetaValue(Utf8(Key(L"web_status_", tool)), Utf8(value));
         } catch (...) {
         }
     }
@@ -323,9 +332,12 @@ void WebSync::OnLoaded(bool succeeded, std::wstring const& url) {
     if (current->tool == Tool::ChatGptWeb) {
         int64_t lastFull = 0, newest = 0;
         try {
-            lastFull = std::atoll(index.MetaValue(Utf8(L"web_full_list_" + std::to_wstring(int(current->tool)))).c_str());
-            auto q = index.Database().Prepare("SELECT max(file_modified) FROM sessions WHERE family = 3 AND tool = ?1");
-            q.Bind(1, int64_t(current->tool));
+            lastFull = std::atoll(index.MetaValue(Utf8(Key(L"web_full_list_", current->tool))).c_str());
+            // Newest chat of this slot's accounts.
+            auto accounts = index.MetaValue(Utf8(Key(L"web_accounts_", current->tool)));
+            auto q = index.Database().Prepare(
+                "SELECT max(file_modified) FROM sessions WHERE family = 3 AND tool = ?1 AND instr(?2, '|' || account || '|') > 0");
+            q.Bind(1, int64_t(current->tool)).Bind(2, accounts);
             if (q.Step()) newest = q.Int(0);
         } catch (...) {
         }
@@ -380,6 +392,13 @@ void WebSync::OnMessage(std::wstring const& text) {
             report(L"", false, false);
         }
         SaveOutcomes();  // signed in is known now; don't wait for the end of a long read
+        try {
+            auto key = Utf8(Key(L"web_accounts_", current->tool));
+            auto accounts = index.MetaValue(key);
+            if (accounts.find("|" + account + "|") == std::string::npos)
+                index.SetMetaValue(key, (accounts.empty() ? "|" : accounts) + account + "|");
+        } catch (...) {
+        }
         if (!seenAccounts.insert(account).second) {
             // The same account again (an unused Google account slot): nothing more to read.
             worker->Post(L"{\"type\":\"fetch\",\"ids\":[]}");
@@ -449,7 +468,7 @@ void WebSync::OnMessage(std::wstring const& text) {
                     first = false;
                 }
         } else if (current->tool == Tool::ChatGptWeb) {
-            try { index.SetMetaValue(Utf8(L"web_full_list_" + std::to_wstring(int(current->tool))), std::to_string(NowMs())); } catch (...) {}
+            try { index.SetMetaValue(Utf8(Key(L"web_full_list_", current->tool)), std::to_string(NowMs())); } catch (...) {}
         }
         if (complete) {
             Transaction transaction(index.Database());
@@ -514,10 +533,11 @@ void CALLBACK WebSync::Watchdog(HWND, UINT, UINT_PTR, DWORD) {
 std::vector<WebSync::SiteStatus> WebSync::Statuses() {
     std::vector<SiteStatus> out;
     for (auto tool : {Tool::ClaudeWeb, Tool::ChatGptWeb, Tool::Gemini}) {
+        if (slot > 1 && tool != Tool::ChatGptWeb) continue;
         SiteStatus status;
         status.tool = tool;
         std::string saved;
-        try { saved = index.MetaValue(Utf8(MetaKey(tool))); } catch (...) {}
+        try { saved = index.MetaValue(Utf8(Key(L"web_status_", tool))); } catch (...) {}
         auto parts = std::vector<std::wstring>();
         std::wstring field;
         for (wchar_t c : Wide(saved)) {
@@ -533,8 +553,11 @@ std::vector<WebSync::SiteStatus> WebSync::Statuses() {
             status.checkedAt = _wtoi64(parts[3].c_str());
         }
         try {
-            auto q = index.Database().Prepare("SELECT count(*) FROM sessions WHERE family = 3 AND tool = ?1 AND skipped = ''");
-            q.Bind(1, int64_t(tool));
+            // This slot's accounts when known (two ChatGPT sign-ins share the tool).
+            auto accounts = index.MetaValue(Utf8(Key(L"web_accounts_", tool)));
+            auto q = index.Database().Prepare(
+                "SELECT count(*) FROM sessions WHERE family = 3 AND tool = ?1 AND skipped = '' AND (?2 = '' OR instr(?2, '|' || account || '|') > 0)");
+            q.Bind(1, int64_t(tool)).Bind(2, accounts);
             if (q.Step()) status.chats = int(q.Int(0));
         } catch (...) {
         }

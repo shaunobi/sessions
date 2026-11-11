@@ -23,7 +23,9 @@ public:
     using Report = std::function<void(std::wstring const& status, bool changed, bool finished)>;
 
     // `profile`: the browser profile folder; by default Browser beside the executable.
-    WebSync(Index& index, Report report, std::filesystem::path profile = {});
+    // `slot` 2 and up: an extra sign-in to ChatGPT only, in its own profile folder.
+    WebSync(Index& index, Report report, std::filesystem::path profile = {}, int slot = 1);
+    int Slot() const { return slot; }
     ~WebSync();
 
     // Opens a visible browser at the service's sign-in page. Closing that
@@ -58,6 +60,10 @@ public:
 private:
     Index& index;
     Report report;
+    std::filesystem::path profile;
+    int slot = 1;
+    std::wstring Key(std::wstring const& base, Tool tool) const;  // meta key for this slot
+    std::unique_ptr<WebBrowser> NewBrowser();
     std::unique_ptr<WebBrowser> worker, signIn;
     std::deque<Service const*> queue;
     Service const* current = nullptr;

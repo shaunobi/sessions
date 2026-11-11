@@ -365,8 +365,11 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     std::unique_ptr<sessions::Indexer> indexer;
     std::unique_ptr<Searcher> searcher;
     std::unique_ptr<sessions::WebSync> webSync;
+    std::unique_ptr<sessions::WebSync> webSync2;  // second ChatGPT account
+    // The second slot syncs only once it has been signed in to.
+    bool SecondChatGptUsed() { for (auto const& s : webSync2->Statuses()) if (s.checked) return true; return false; }
     Microsoft::UI::Dispatching::DispatcherQueueTimer webTimer{nullptr};
-    std::wstring indexMessage, webMessage;
+    std::wstring indexMessage, webMessage, webMessage2;
     StackPanel webSites{nullptr};
     std::vector<Tool> toolChoices;  // parallel to ToolFilter items after "All tools"
 
@@ -548,6 +551,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             searchDelay.Stop();
             if (quickDelay) quickDelay.Stop();
             if (webTimer) webTimer.Stop();
+            webSync2.reset();
             webSync.reset();
             if (indexer) indexer->Stop();
             indexer.reset();
@@ -601,13 +605,33 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 ShowWebInfo();
             }
         });
-        Named<HyperlinkButton>(shell, L"SyncWeb").Click([this](auto&&, auto&&) { webSync->SyncAll(); });
+        // A second ChatGPT sign-in (say, a work account) in its own browser profile.
+        webSync2 = std::make_unique<sessions::WebSync>(
+            *index,
+            [this](std::wstring const& status, bool changed, bool finished) {
+                if (closing) return;
+                if (finished) webMessage2.clear();
+                else if (!status.empty()) webMessage2 = status;
+                ShowCombinedStatus();
+                if (split && split.IsPaneOpen()) ShowWebInfo();
+                if (changed) Reload();
+                if (finished) {
+                    if (changed && indexer) indexer->Rescan();
+                    ShowWebInfo();
+                }
+            },
+            sessions::ExecutableFolder() / L"Browser2", 2);
+        Named<HyperlinkButton>(shell, L"SyncWeb").Click([this](auto&&, auto&&) {
+            webSync->SyncAll();
+            if (SecondChatGptUsed()) webSync2->SyncAll();
+        });
         webTimer = window.DispatcherQueue().CreateTimer();
         webTimer.Interval(std::chrono::seconds(20));
         webTimer.IsRepeating(true);
         webTimer.Tick([this](auto&&, auto&&) {
             webTimer.Interval(std::chrono::minutes(30));
             if (webSync && !closing) webSync->SyncAll();
+            if (webSync2 && !closing && SecondChatGptUsed()) webSync2->SyncAll();
         });
         webTimer.Start();
     }
@@ -1615,11 +1639,18 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     void ShowWebInfo() {
         if (!webSites || !webSync) return;
         webSites.Children().Clear();
+        std::vector<std::pair<sessions::WebSync*, sessions::WebSync::SiteStatus>> rows;
         for (auto const& site : webSync->Statuses()) {
+            rows.emplace_back(webSync.get(), site);
+            if (site.tool == Tool::ChatGptWeb && webSync2)
+                for (auto const& second : webSync2->Statuses()) rows.emplace_back(webSync2.get(), second);
+        }
+        for (auto const& [sync, site] : rows) {
             std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : sessions::ToolName(site.tool);
-            std::wstring now = webSync->Live(site.tool);
+            if (sync->Slot() > 1) name += L" \u00B7 second account";
+            std::wstring now = sync->Live(site.tool);
             // Signed in if the check running now says so, otherwise per the last finished check.
-            const bool signedIn = webSync->SignedInNow(site.tool) || (now.empty() || now.rfind(L"Waiting", 0) == 0 || now.rfind(L"Next", 0) == 0
+            const bool signedIn = sync->SignedInNow(site.tool) || (now.empty() || now.rfind(L"Waiting", 0) == 0 || now.rfind(L"Next", 0) == 0
                                                                           ? site.signedIn
                                                                           : false) ||
                                   (!now.empty() && site.signedIn);
@@ -1631,8 +1662,9 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 text = now + L".";
                 if (signedIn && now.rfind(L"Signed in", 0) != 0) text = L"Signed in. " + text;
             } else if (!site.checked) {
-                text = L"Not signed in yet. Press Sign in.";
-                needsYou = true;
+                text = sync->Slot() > 1 ? L"Optional: sign in here with another ChatGPT account, such as a work one."
+                                        : L"Not signed in yet. Press Sign in.";
+                needsYou = sync->Slot() == 1;
             } else if (site.signedIn) {
                 text = L"Signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L". Nothing to do.";
             } else if (unreachable) {
@@ -1685,14 +1717,14 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             signIn.Content(box_value(signedIn ? L"Switch account" : L"Sign in"));
             if (needsYou) signIn.Style(Application::Current().Resources().Lookup(box_value(L"AccentButtonStyle")).as<Style>());
             auto tool = site.tool;
-            signIn.Click([this, tool, signedIn](auto&&, auto&&) {
+            signIn.Click([this, sync, tool, signedIn](auto&&, auto&&) {
                 if (signedIn) {
                     // Switching account: sign out first so the site shows its account chooser.
-                    webSync->SignOut(tool, [this, tool](std::wstring) {
-                        if (!closing) webSync->SignIn(tool);
+                    sync->SignOut(tool, [this, sync, tool](std::wstring) {
+                        if (!closing) sync->SignIn(tool);
                     });
                 } else {
-                    webSync->SignIn(tool);
+                    sync->SignIn(tool);
                 }
             });
             actions.Children().Append(signIn);
@@ -1701,8 +1733,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 out.Content(box_value(L"Sign out"));
                 out.Padding({4, 0, 4, 0});
                 out.FontSize(12);
-                out.Click([this, tool](auto&&, auto&&) {
-                    webSync->SignOut(tool, [this](std::wstring message) {
+                out.Click([this, sync, tool](auto&&, auto&&) {
+                    sync->SignOut(tool, [this](std::wstring message) {
                         if (closing) return;
                         webNotice = message;
                         ShowWebInfo();
@@ -1726,12 +1758,13 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void ShowCombinedStatus() {
-        std::wstring text = webMessage.empty() ? indexMessage : L"Syncing web chats \u00B7 " + webMessage;
+        std::wstring web = webMessage.empty() ? webMessage2 : webMessage;
+        std::wstring text = web.empty() ? indexMessage : L"Syncing web chats \u00B7 " + web;
         statusText.Text(text);
         tray.SetTip((L"Sessions \u00B7 " + text).c_str());
         ToolTipService::SetToolTip(statusText, box_value(text));
         using State = sessions::IndexStatus::State;
-        const bool working = !webMessage.empty() || lastIndexStatus.state == State::Scanning || lastIndexStatus.state == State::Indexing;
+        const bool working = !web.empty() || lastIndexStatus.state == State::Scanning || lastIndexStatus.state == State::Indexing;
         busy.IsActive(working);
         busy.Visibility(working ? Visibility::Visible : Visibility::Collapsed);
         doneIcon.Visibility(!working && lastIndexStatus.state == State::Ready ? Visibility::Visible : Visibility::Collapsed);

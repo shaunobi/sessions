@@ -26,6 +26,8 @@ public:
 
     // The profile folder (cookies and site storage) for every browser.
     static void SetProfileFolder(std::filesystem::path folder);
+    // This browser's own profile folder instead (before Create): a second sign-in to the same site.
+    void UseProfile(std::filesystem::path folder);
 
     // Creates the window (hidden unless `visible`) and its browser; `ready`
     // runs once the browser can navigate, or with false if WebView2 failed.
@@ -49,6 +51,7 @@ private:
     struct Browser;  // the WebView2 objects (kept out of this header: WRL's
                      // Microsoft namespace collides with C++/WinRT's)
     HWND window = nullptr;
+    std::filesystem::path profile;
     std::unique_ptr<Browser> browser;
     MessageHandler message;
     LoadedHandler loaded;

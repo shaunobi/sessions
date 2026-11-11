@@ -1,4 +1,5 @@
 #include "WebBrowser.h"
+#include <map>
 #include "ResourceIds.h"
 #include <objbase.h>  // WIN32_LEAN_AND_MEAN leaves out the COM `interface` keyword WebView2.h needs
 #include <WebView2.h>
@@ -15,38 +16,43 @@ namespace {
 constexpr wchar_t ClassName[] = L"SessionsWebBrowser";
 std::filesystem::path profileFolder;
 
-// One browser environment (Edge process group) shared by every window.
-ComPtr<ICoreWebView2Environment> environment;
-bool environmentStarting = false;
-std::vector<std::function<void(ICoreWebView2Environment*)>> environmentWaiters;
+// One browser environment (Edge process group) per profile folder, shared by
+// every window of that profile. Separate profiles keep separate sign-ins.
+struct Environment {
+    ComPtr<ICoreWebView2Environment> created;
+    bool starting = false;
+    std::vector<std::function<void(ICoreWebView2Environment*)>> waiters;
+};
+std::map<std::wstring, Environment> environments;
 
-void WithEnvironment(std::function<void(ICoreWebView2Environment*)> use) {
-    if (environment) {
-        use(environment.Get());
+void WithEnvironment(std::filesystem::path const& folder, std::function<void(ICoreWebView2Environment*)> use) {
+    auto key = folder.wstring();
+    auto& env = environments[key];
+    if (env.created) {
+        use(env.created.Get());
         return;
     }
-    environmentWaiters.push_back(std::move(use));
-    if (environmentStarting) return;
-    environmentStarting = true;
-    std::filesystem::create_directories(profileFolder);
+    env.waiters.push_back(std::move(use));
+    if (env.starting) return;
+    env.starting = true;
+    std::filesystem::create_directories(folder);
+    auto finish = [key](ICoreWebView2Environment* made) {
+        auto& e = environments[key];
+        e.starting = false;
+        if (made) e.created = made;
+        auto waiters = std::move(e.waiters);
+        e.waiters.clear();
+        for (auto& waiter : waiters) waiter(e.created.Get());
+    };
     HRESULT started = CreateCoreWebView2EnvironmentWithOptions(
-        nullptr, profileFolder.c_str(), nullptr,
+        nullptr, folder.c_str(), nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [](HRESULT result, ICoreWebView2Environment* created) -> HRESULT {
-                environmentStarting = false;
-                if (SUCCEEDED(result)) environment = created;
-                auto waiters = std::move(environmentWaiters);
-                environmentWaiters.clear();
-                for (auto& waiter : waiters) waiter(environment.Get());
+            [finish](HRESULT result, ICoreWebView2Environment* created) -> HRESULT {
+                finish(SUCCEEDED(result) ? created : nullptr);
                 return S_OK;
             })
             .Get());
-    if (FAILED(started)) {
-        environmentStarting = false;
-        auto waiters = std::move(environmentWaiters);
-        environmentWaiters.clear();
-        for (auto& waiter : waiters) waiter(nullptr);
-    }
+    if (FAILED(started)) finish(nullptr);
 }
 
 }  // namespace
@@ -61,6 +67,7 @@ WebBrowser::WebBrowser() = default;
 bool WebBrowser::Ready() const { return browser && browser->view; }
 
 void WebBrowser::SetProfileFolder(std::filesystem::path folder) { profileFolder = std::move(folder); }
+void WebBrowser::UseProfile(std::filesystem::path folder) { profile = std::move(folder); }
 
 WebBrowser::~WebBrowser() {
     if (browser && browser->controller) browser->controller->Close();
@@ -87,7 +94,7 @@ void WebBrowser::Create(wchar_t const* title, bool visible, std::function<void(b
     browser = std::make_unique<Browser>();
     if (visible) Show();
 
-    WithEnvironment([this, ready](ICoreWebView2Environment* env) {
+    WithEnvironment(profile.empty() ? profileFolder : profile, [this, ready](ICoreWebView2Environment* env) {
         if (!env || !window) {
             ready(false);
             return;
