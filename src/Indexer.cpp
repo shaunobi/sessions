@@ -247,7 +247,7 @@ void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, 
     if (!embedder) return;
     {
         Transaction transaction(index.Database());
-        index.UseEmbeddingModel(EmbeddingModelName);
+        index.UseEmbeddingModel(embedder->Name());
         transaction.Commit();
     }
     EmbedTitles(index, *embedder, stop);

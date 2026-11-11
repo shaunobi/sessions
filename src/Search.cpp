@@ -1,6 +1,7 @@
 #include "Search.h"
 #include "Embedder.h"
 #include "Text.h"
+#include <windows.h>
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -13,11 +14,18 @@ namespace {
 // Reciprocal rank fusion: a session ranked well by either search rises.
 constexpr double FusionK = 20.0;
 // Meaning-only results: those within this distance of the best match, up to a cap.
-constexpr float MeaningWindow = 0.08f;
-constexpr float MeaningFloor = 0.55f;
+// Models differ in how similar unrelated text looks (one puts noise at 0.65, another at
+// 0.25), so meaning results are judged against this query's own spread of scores:
+// how many standard deviations above the average session a result stands.
+float Tuned(wchar_t const* name, float fallback) {  // SESSIONS_<name> overrides, for tuning tests
+    wchar_t value[32];
+    return GetEnvironmentVariableW(name, value, 32) > 0 ? float(_wtof(value)) : fallback;
+}
+const float MeaningZ = Tuned(L"SESSIONS_MEANING_Z", 3.0f);        // a meaning-only result stands at least this far out
+const float MeaningWindowZ = Tuned(L"SESSIONS_WINDOW_Z", 3.0f);   // and within this many deviations of the best
+const float UnknownWordsZ = Tuned(L"SESSIONS_UNKNOWN_Z", 6.0f);  // nonsense words: only a standout match counts
 // Gibberish still lands around 0.65-0.69, as close as some real questions, so
 // a query none of whose words appear anywhere only gets results this similar.
-constexpr float UnknownWordsFloor = 0.75f;  // below this, "similar meaning" is noise (nonsense words score about 0.65)
 constexpr size_t MeaningCap = 40;
 
 struct Best {
@@ -54,6 +62,7 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
     auto keyword = index.Search(query);
 
     std::vector<std::pair<int64_t, Best>> meaning;
+    std::vector<float> all;  // every session's meaning score, for this query's spread
     if (auto embedder = Embedder::Shared()) {
         Refresh();
         auto q = pieces.empty() ? std::vector<float>() : embedder->EmbedQuery(Utf8(query));
@@ -112,9 +121,17 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
                     // A name alone is thinner evidence than a session's own words.
                     if (only.similarity > -2) meaning.push_back({id, {only.similarity - 0.04f, 0, 0}});
                 }
+            for (auto const& m : meaning) all.push_back(m.second.similarity);
             std::sort(meaning.begin(), meaning.end(), [](auto const& a, auto const& b) { return a.second.similarity > b.second.similarity; });
             if (meaning.size() > 200) meaning.resize(200);
         }
+    }
+
+    // For comparing models: the meaning ranking alone, uncut (SESSIONS_MEANING_ONLY=1).
+    if (GetEnvironmentVariableW(L"SESSIONS_MEANING_ONLY", nullptr, 0) > 0) {
+        std::vector<Found> only;
+        for (auto const& [session, best] : meaning) only.push_back({session, double(best.similarity), {}, true, best.similarity});
+        return only;
     }
 
     // Short queries are usually names or terms: favor exact words. Sentences
@@ -142,11 +159,21 @@ std::vector<Found> HybridSearch::Run(std::wstring const& query, size_t snippets)
         keywordMessage[found.session] = keyword[rank].bestMessage;
     }
     const float top = meaning.empty() ? 0 : meaning.front().second.similarity;
-    if (top < UnknownWordsFloor && keyword.empty() && !index.KnowsAnyWord(query)) meaning.clear();
+    float mean = 0, spread = 0;
+    if (!meaning.empty()) {
+        // Over every session the model scored (meaning holds the best 200; the full list is in `all`).
+        for (float v : all) mean += v;
+        mean /= float(all.size());
+        for (float v : all) spread += (v - mean) * (v - mean);
+        spread = std::sqrt(spread / float(all.size()));
+        if (spread <= 0) spread = 1;
+    }
+    auto z = [&](float v) { return (v - mean) / spread; };
+    if (!meaning.empty() && z(top) < UnknownWordsZ && keyword.empty() && !index.KnowsAnyWord(query)) meaning.clear();
     for (size_t rank = 0; rank < meaning.size(); ++rank) {
         auto const& [session, best] = meaning[rank];
         bool inKeyword = merged.count(session) > 0;
-        bool strong = rank < MeaningCap && best.similarity >= MeaningFloor && best.similarity >= top - MeaningWindow;
+        bool strong = rank < MeaningCap && z(best.similarity) >= MeaningZ && z(best.similarity) >= z(top) - MeaningWindowZ;
         if (!inKeyword && !strong) continue;
         auto& found = merged[session];
         found.session = session;

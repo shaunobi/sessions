@@ -1811,12 +1811,13 @@ namespace {
 int RunHeadless(int argc, wchar_t** argv) {
     std::filesystem::path database = sessions::Index::DefaultFile();
     std::vector<std::wstring> queries;
-    bool scan = false;
+    bool scan = false, keys = false;  // --keys: every result's session key, in order (for scoring tests)
     for (int i = 1; i < argc; ++i) {
         std::wstring_view arg(argv[i]);
         if (arg == L"--index") scan = true;
         else if (arg == L"--db" && i + 1 < argc) database = argv[++i];
         else if (arg == L"--search" && i + 1 < argc) queries.push_back(argv[++i]);
+        else if (arg == L"--keys") keys = true;
     }
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!out || out == INVALID_HANDLE_VALUE) {
@@ -1864,6 +1865,12 @@ int RunHeadless(int argc, wchar_t** argv) {
             auto hits = hybrid.Run(query, 8);
             print(L"search \u201C" + query + L"\u201D: " + std::to_wstring(hits.size()) + L" sessions in " +
                   std::to_wstring(sessions::NowMs() - started) + L" ms");
+            if (keys) {
+                std::wstring line = L"keys";
+                for (auto const& hit : hits)
+                    if (auto row = byId[hit.session]) line += L"	" + sessions::Wide(row->key);
+                print(line);
+            }
             for (size_t i = 0; i < hits.size() && i < 8; ++i) {
                 auto row = byId[hits[i].session];
                 auto snippet = (hits[i].byMeaning ? L"[meaning " + std::to_wstring(int(hits[i].similarity * 100)) + L"] " : std::wstring()) +

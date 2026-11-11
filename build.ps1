@@ -24,6 +24,16 @@ foreach ($name in $modelFiles.Keys) {
     $target = Join-Path $models $name
     if (!(Test-Path $target)) { Invoke-WebRequest $modelFiles[$name] -OutFile $target }
 }
+# Meaning model shipped beside the executable (Model folder): Snowflake Arctic Embed M v1.5
+# (Apache 2.0), chosen by scoring candidates on real searches (qa-meaning). The built-in
+# BGE small model above is the fallback when the folder is missing.
+$arctic = Join-Path $models 'snowflake-arctic-embed-m-v1.5'
+$arcticRevision = 'e58a8f756156a1293d763f17e3aae643474e9b8a'
+New-Item -ItemType Directory -Force $arctic | Out-Null
+foreach ($file in @(@('model.onnx', 'onnx/model.onnx'), @('vocab.txt', 'vocab.txt'))) {
+    $target = Join-Path $arctic $file[0]
+    if (!(Test-Path $target)) { Invoke-WebRequest "https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5/resolve/$arcticRevision/$($file[1])" -OutFile $target }
+}
 # Tool logos for the cards come from the apps installed on this PC (not committed).
 if (!(Test-Path (Join-Path $PSScriptRoot 'assets\logos\chatgpt-white.png')) -or !(Test-Path (Join-Path $PSScriptRoot 'assets\logos\gemini.png'))) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tools\ExtractLogos.ps1')
@@ -32,4 +42,10 @@ if (!(Test-Path (Join-Path $PSScriptRoot 'assets\logos\chatgpt-white.png')) -or 
 if ($LASTEXITCODE) { throw 'Package restore failed.' }
 & (Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe') Sessions.vcxproj /m /v:minimal /p:Configuration=$Configuration /p:Platform=x64 "/p:SessionsBuildRoot=$BuildRoot"
 if ($LASTEXITCODE) { throw 'C++ build failed.' }
+$modelOut = Join-Path $BuildRoot "$Configuration\Model"
+New-Item -ItemType Directory -Force $modelOut | Out-Null
+robocopy $arctic $modelOut model.onnx vocab.txt /NFL /NDL /NJH /NJS /NP | Out-Null
+if ($LASTEXITCODE -ge 8) { throw 'Could not copy the meaning model.' }
+$global:LASTEXITCODE = 0
+Set-Content (Join-Path $modelOut 'name.txt') 'snowflake-arctic-embed-m-v1.5' -Encoding ascii
 Write-Output (Join-Path $BuildRoot "$Configuration\Sessions.exe")

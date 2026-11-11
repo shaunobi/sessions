@@ -12,9 +12,9 @@
 // the GPU through DirectML when available, otherwise on the CPU.
 namespace sessions {
 
-constexpr int EmbeddingSize = 384;
 constexpr size_t ChunkTokens = 254;  // plus [CLS] and [SEP]
-constexpr char const* EmbeddingModelName = "bge-small-en-v1.5";
+// The model built into the executable, used when no model folder is installed.
+constexpr char const* BuiltInModelName = "bge-small-en-v1.5";
 
 class Embedder {
 public:
@@ -26,6 +26,12 @@ public:
     static std::shared_ptr<Embedder> Shared(std::wstring* problem = nullptr);
 
     Tokenizer const& Tokens() const { return tokenizer; }
+    // Which model is loaded; stored with the vectors so a change re-embeds everything.
+    std::string const& Name() const { return name; }
+    // Where a model is looked for, in order: the folder named by the
+    // SESSIONS_MODEL environment variable, then a Model folder beside the
+    // executable. Each holds model.onnx (+ model.onnx_data) and vocab.txt; the
+    // folder's name is the model's name. Otherwise the built-in model.
     std::wstring const& Device() const { return device; }
 
     // Each input is a list of word-piece ids (at most ChunkTokens). Returns one
@@ -41,6 +47,7 @@ private:
     std::unique_ptr<Runtime> runtime;
     Tokenizer tokenizer;
     std::wstring device;
+    std::string name;
     std::mutex mutex;  // DirectML sessions take one run at a time
     bool Load(std::wstring& problem);
 };

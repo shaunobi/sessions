@@ -6,6 +6,9 @@
 #include <dml_provider_factory.h>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iterator>
+#include <windows.h>
 
 namespace sessions {
 
@@ -43,10 +46,30 @@ std::shared_ptr<Embedder> Embedder::Shared(std::wstring* problem) {
 }
 
 bool Embedder::Load(std::wstring& problem) {
-    // The model and vocabulary are embedded in the executable.
-    auto model = EmbeddedFile(IDR_MODEL);
-    auto vocab = EmbeddedFile(IDR_VOCAB);
-    if (model.empty() || vocab.empty()) {
+    fs::path folder;
+    if (wchar_t value[1024]; GetEnvironmentVariableW(L"SESSIONS_MODEL", value, 1024) > 0) folder = value;
+    else if (fs::exists(ExecutableFolder() / L"Model" / L"model.onnx")) folder = ExecutableFolder() / L"Model";
+    std::string fileVocab;
+    std::wstring modelFile;
+    if (!folder.empty()) {
+        modelFile = (folder / L"model.onnx").wstring();
+        std::ifstream in(folder / L"vocab.txt", std::ios::binary);
+        fileVocab.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        name = Utf8(folder.filename().wstring());
+        // A Model folder beside the executable may say its name in name.txt.
+        std::ifstream named(folder / L"name.txt");
+        if (std::string line; named && std::getline(named, line) && !line.empty()) name = line;
+        if (!fs::exists(modelFile) || fileVocab.empty()) {
+            problem = L"Meaning search is off: no model.onnx and vocab.txt in " + folder.wstring();
+            return false;
+        }
+    } else {
+        name = BuiltInModelName;
+    }
+    // Otherwise the model and vocabulary are embedded in the executable.
+    auto model = folder.empty() ? EmbeddedFile(IDR_MODEL) : std::string_view();
+    std::string_view vocab = folder.empty() ? EmbeddedFile(IDR_VOCAB) : std::string_view(fileVocab);
+    if ((folder.empty() && model.empty()) || vocab.empty()) {
         problem = L"Meaning search is off: this build has no embedding model";
         return false;
     }
@@ -70,7 +93,8 @@ bool Embedder::Load(std::wstring& problem) {
             // Leave cores for everything else on the machine.
             options.SetIntraOpNumThreads(4);
         }
-        runtime->session = Ort::Session(runtime->env, model.data(), model.size(), options);
+        runtime->session = modelFile.empty() ? Ort::Session(runtime->env, model.data(), model.size(), options)
+                                             : Ort::Session(runtime->env, modelFile.c_str(), options);
     };
     try {
         open(true);
@@ -129,7 +153,7 @@ std::vector<std::vector<float>> Embedder::Embed(std::vector<std::vector<int32_t>
     const size_t stride = dims.size() == 3 ? size_t(dims[1] * dims[2]) : size_t(dims.back());
     const size_t width = size_t(dims.back());
     for (size_t b = 0; b < batch; ++b) {
-        std::vector<float> vector(data + b * stride, data + b * stride + std::min<size_t>(width, EmbeddingSize));
+        std::vector<float> vector(data + b * stride, data + b * stride + width);
         float norm = 0;
         for (float v : vector) norm += v * v;
         norm = std::sqrt(norm);
