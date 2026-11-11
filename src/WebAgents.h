@@ -34,7 +34,13 @@ const toIso = (v) => {
 async function getJson(url, init) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const r = await fetch(url, Object.assign({ credentials: 'include' }, init || {}));
-    if (r.status === 429) { await sleep(5000 * (attempt + 1)); continue; }
+    // Too many requests: back off well before trying again. The site's limit is shared
+    // with your own browser, so pressing on would also stop chats loading for you.
+    if (r.status === 429) {
+      post({ type: 'status', text: 'The site asked Sessions to slow down; pausing' });
+      await sleep(30000 * (attempt + 1));
+      continue;
+    }
     if (r.status === 401 || r.status === 403) {
       let detail = '';
       try { detail = (await r.text()).replace(/\s+/g, ' ').slice(0, 300); } catch (e) {}
@@ -190,7 +196,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           post({ type: 'error', text: 'ChatGPT conversation ' + id + ': ' + e.message });
         }
         if (++n % 10 === 0) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length });
-        await sleep(400);
+        await sleep(1500);  // ChatGPT rate-limits conversation reads; stay well under it
       }
     }
     post({ type: 'done' });
