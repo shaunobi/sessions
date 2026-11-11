@@ -313,8 +313,24 @@ void WebSync::OnMessage(std::wstring const& text) {
     if (!json::Parse(Utf8(text), message) || !message.IsObject()) return;
     auto type = message.Str("type");
 
-    if (type == "status") {
-        report(Wide(message.Str("text")), false, false);
+    if (type == "identity") {
+        // Signed in: say so straight away, before the (possibly long) listing.
+        auto& outcome = outcomes[current->tool];
+        outcome.signedIn = true;
+        std::wstring who = Wide(message.Str("who"));
+        live[current->tool] = who.empty() ? L"Signed in \u00B7 finding your chats" : L"Signed in as " + who + L" \u00B7 finding your chats";
+        report(L"", false, false);
+    } else if (type == "status") {
+        std::wstring text = Wide(message.Str("text"));
+        // "ChatGPT · 40 of 300" → shown in the site's row as progress.
+        auto dot = text.find(L" \u00B7 ");
+        std::wstring detail = dot == std::wstring::npos ? text : text.substr(dot + 3);
+        if (outcomes[current->tool].signedIn && !detail.empty()) {
+            if (detail == L"listing") detail = L"finding your chats";
+            else if (detail.find(L" of ") != std::wstring::npos) detail = L"reading chats, " + detail;
+            live[current->tool] = L"Signed in \u00B7 " + detail;
+        }
+        report(text, false, false);
     } else if (type == "signedOut") {
         auto detail = message.Str("detail");
         Finish(L"not signed in" + (detail.empty() ? std::wstring() : L" (" + Wide(detail) + L")"));

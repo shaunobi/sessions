@@ -65,6 +65,7 @@ constexpr wchar_t Claude[] = LR"JS(
       return m.text || '';
     };
     const orgs = await getJson('/api/organizations');
+    post({ type: 'identity', who: orgs.map((o) => o.name).filter(Boolean).join(', ') });
     for (const org of orgs) {
       const caps = org.capabilities || [];
       if (caps.length && !caps.includes('chat')) continue;
@@ -115,6 +116,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
     const session = await getJson('/api/auth/session');
     if (!session || !session.accessToken) { post({ type: 'signedOut', detail: 'no access token in /api/auth/session' }); return; }
     const auth = { Authorization: 'Bearer ' + session.accessToken };
+    post({ type: 'identity', who: (session.user && (session.user.email || session.user.name)) || '' });
     // Personal account and any workspaces.
     let accounts = [];
     try {
@@ -237,6 +239,7 @@ constexpr wchar_t Gemini[] = LR"JS(
     }
     const seconds = (t) => (Array.isArray(t) && typeof t[0] === 'number' ? new Date(t[0] * 1000).toISOString() : '');
     const account = 'gemini:' + (W.oPEP7c || 'account');
+    post({ type: 'identity', who: W.oPEP7c || '' });
     post({ type: 'status', text: 'Gemini · listing' });
     const items = [];
     const titles = {};
