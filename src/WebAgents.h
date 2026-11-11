@@ -33,14 +33,27 @@ const toIso = (v) => {
 };
 async function getJson(url, init) {
   for (let attempt = 0; attempt < 4; attempt++) {
-    const r = await fetch(url, Object.assign({ credentials: 'include' }, init || {}));
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 60000);
+    let r;
+    try {
+      r = await fetch(url, Object.assign({ credentials: 'include', signal: abort.signal }, init || {}));
+    } catch (e) {
+      clearTimeout(timer);
+      if (attempt < 3) { await sleep(5000); continue; }
+      throw new Error(url.split('?')[0] + ' did not answer');
+    }
+    clearTimeout(timer);
     // Too many requests: back off well before trying again. The site's limit is shared
     // with your own browser, so pressing on would also stop chats loading for you.
     if (r.status === 429) {
       const after = parseInt(r.headers.get('retry-after') || '', 10);
       const wait = after > 0 && after < 600 ? after * 1000 : 30000 * (attempt + 1);
-      post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; pausing ' + Math.round(wait / 1000) + ' seconds' });
-      await sleep(wait);
+      // Say so every half minute while waiting, so Sessions knows the sync is alive.
+      for (let left = wait; left > 0; left -= 30000) {
+        post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; resuming in ' + Math.round(left / 1000) + ' seconds' });
+        await sleep(Math.min(left, 30000));
+      }
       continue;
     }
     if (r.status === 401 || r.status === 403) {
@@ -165,7 +178,8 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           const page = await getJson('/backend-api/conversations?offset=' + offset + '&limit=100&order=updated&is_archived=' + archived, { headers });
           const list = page.items || [];
           for (const c of list) items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time) });
-          if (list.length < 100) break;
+          post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
+          if (list.length < 100 || offset > 50000) break;
           await sleep(300);
         }
       }
@@ -177,12 +191,18 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           if (!g.id) continue;
           const name = (g.display && g.display.name) || '';
           let cursor = '0';
-          while (cursor !== null && cursor !== undefined) {
+          const cursors = new Set();
+          // Stop when the cursor runs out, repeats, or a page brings nothing.
+          while (cursor !== null && cursor !== undefined && cursor !== '' && !cursors.has(String(cursor)) && cursors.size < 200) {
+            cursors.add(String(cursor));
             const page = await getJson('/backend-api/gizmos/' + g.id + '/conversations?cursor=' + encodeURIComponent(cursor), { headers });
-            for (const c of page.items || []) {
+            const list = page.items || [];
+            for (const c of list) {
               items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time) });
               projectOf[c.id] = name;
             }
+            post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
+            if (!list.length) break;
             cursor = page.cursor;
             await sleep(300);
           }
@@ -191,6 +211,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
       try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf })); } catch (e) {}
       }
 
+      { const seen = new Set(); items = items.filter((x) => !seen.has(x.id) && seen.add(x.id)); }
       const ids = await askWhichToFetch({ type: 'list', account, accountName: acct.name, complete: true, items });
       let n = 0;
       for (const full of ids) {
