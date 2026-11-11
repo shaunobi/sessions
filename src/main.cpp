@@ -298,6 +298,9 @@ constexpr wchar_t ShellMarkup[] = LR"(
             <Setter Property='MinHeight' Value='0'/>
           </Style>
         </GridView.ItemContainerStyle>
+        <GridView.ItemTemplate>
+          <DataTemplate><Border/></DataTemplate>
+        </GridView.ItemTemplate>
       </GridView>
       <TextBlock x:Name='Empty' Grid.Row='2' HorizontalAlignment='Center' VerticalAlignment='Center' Visibility='Collapsed'
                  Foreground='{ThemeResource TextFillColorSecondaryBrush}' TextWrapping='Wrap' TextAlignment='Center' MaxWidth='420'/>
@@ -462,14 +465,16 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         // made as its slot comes into view (thousands of sessions stay quick).
         cards.ContainerContentChanging([this](ListViewBase const&, ContainerContentChangingEventArgs const& args) {
             args.Handled(true);
+            auto slot = args.ItemContainer().ContentTemplateRoot().try_as<Border>();
+            if (!slot) return;
             if (args.InRecycleQueue()) {
-                args.ItemContainer().Content(nullptr);
+                slot.Child(nullptr);
                 return;
             }
             auto id = args.Item().try_as<int64_t>();
             auto row = id ? Row(*id) : nullptr;
             try {
-                args.ItemContainer().Content(row ? IInspectable(CardFor(*row)) : nullptr);
+                slot.Child(row ? CardFor(*row).as<UIElement>() : nullptr);
             } catch (winrt::hresult_error const&) {
             }
         });
@@ -887,8 +892,9 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         } else {
             // Same cards in the same order: refresh the ones on screen (new titles, counts, snippets).
             for (uint32_t i = 0; i < items.Size(); ++i)
-                if (auto container = cards.ContainerFromIndex(int32_t(i)).try_as<ContentControl>())
-                    if (auto row = Row(shown[i])) container.Content(CardFor(*row));
+                if (auto container = cards.ContainerFromIndex(int32_t(i)).try_as<Primitives::SelectorItem>())
+                    if (auto slot = container.ContentTemplateRoot().try_as<Border>())
+                        if (auto row = Row(shown[i])) slot.Child(CardFor(*row).as<UIElement>());
         }
 
         std::wstring count;
