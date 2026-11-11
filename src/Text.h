@@ -24,6 +24,10 @@ std::string DecodeEntities(std::string_view text);
 // True for injected context (system reminders, environment blocks, command echoes)
 // that the person did not type, in either tool's transcripts.
 bool IsInjectedContext(std::string_view text);
+// What the person typed in one block of a user message: an app's wrapper tags
+// removed, the request pulled out of a "Files mentioned by the user" wrapper,
+// and empty when what is left is context the app added.
+std::string OwnWords(std::string_view text);
 
 std::filesystem::path HomeFolder();
 std::filesystem::path RoamingFolder();

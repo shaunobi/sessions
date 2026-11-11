@@ -16,12 +16,13 @@ constexpr size_t MaxMessageBytes = 64 * 1024;
 std::string Texts(json::Value const* content, std::string_view wanted) {
     std::string out;
     if (!content) return out;
-    if (content->IsString()) return IsInjectedContext(content->string) ? std::string() : content->string;
+    const bool user = wanted == "input_text";
+    if (content->IsString()) return user ? OwnWords(content->string) : IsInjectedContext(content->string) ? std::string() : content->string;
     if (!content->IsArray()) return out;
     for (auto const& item : content->array) {
         if (item.Str("type") != wanted) continue;
-        auto text = item.Str("text");
-        if (IsInjectedContext(text)) continue;
+        std::string text = user ? OwnWords(item.Str("text")) : IsInjectedContext(item.Str("text")) ? std::string() : std::string(item.Str("text"));
+        if (text.find_first_not_of(" \n\r\t") == std::string::npos) continue;
         if (!out.empty()) out += "\n\n";
         out += text;
     }
@@ -84,10 +85,7 @@ ParsedSession ParseCodex(std::filesystem::path const& file) {
         auto role = item->Str("role");
         std::string text;
         if (role == "user") {
-            text = Texts(item->Get("content"), "input_text");
-            std::string_view view(text);
-            if (!view.empty() && view.front() == '<') text = StripTags(view);
-            text = Squash(text);
+            text = Squash(Texts(item->Get("content"), "input_text"));
         } else if (role == "assistant") {
             text = Texts(item->Get("content"), "output_text");
         } else {

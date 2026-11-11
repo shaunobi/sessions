@@ -561,7 +561,9 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         webSites = Named<StackPanel>(shell, L"WebSites");
         webSync = std::make_unique<sessions::WebSync>(*index, [this](std::wstring const& status, bool changed, bool finished) {
             if (closing) return;
-            webMessage = status;
+            // Row-only updates carry no status text; keep the last one until the run ends.
+            if (finished) webMessage.clear();
+            else if (!status.empty()) webMessage = status;
             ShowCombinedStatus();
             if (split && split.IsPaneOpen()) ShowWebInfo();
             if (changed) Reload();
@@ -688,7 +690,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         int accountIndex = 0;
         for (auto const& account : accountRows) {
             accountChoices.push_back(account.id);
-            accountFilter.Items().Append(box_value(account.name));
+            // Names alone don't say the site ("Personal" is ChatGPT, "Personal Ultra" is Claude).
+            std::wstring site = account.id.rfind("gemini:", 0) == 0        ? L"Gemini"
+                                : account.id.rfind("antigravity:", 0) == 0 ? L"Antigravity"
+                                : account.family == sessions::Family::Codex ? L"ChatGPT"
+                                                                             : L"Claude";
+            accountFilter.Items().Append(box_value(account.name.rfind(site, 0) == 0 ? account.name : site + L" \u00B7 " + account.name));
             if (account.id == selectedAccount) accountIndex = int(accountChoices.size());
         }
         accountFilter.SelectedIndex(accountIndex);
@@ -1573,7 +1580,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             state.FontSize(12);
             state.TextWrapping(TextWrapping::Wrap);
             state.Foreground(ThemeBrush(needsYou ? L"SystemFillColorCautionBrush" : L"TextFillColorSecondaryBrush"));
-            if (!site.problem.empty()) ToolTipService::SetToolTip(state, box_value(site.problem));
+            // The saved problem belongs to the last check; don't show it beside a row that says signed in.
+            if (!site.problem.empty() && !signedIn) ToolTipService::SetToolTip(state, box_value(site.problem));
             words.Children().Append(state);
             row.Children().Append(words);
 

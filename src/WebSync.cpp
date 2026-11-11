@@ -205,6 +205,8 @@ void WebSync::Sync(std::optional<Tool> only) {
     changed = false;
     outcomes.clear();
     seenAccounts.clear();
+    rounds = 0;
+    listedUpdated.clear();
     queue.clear();
     for (auto const& s : Services)
         if (!only || s.tool == *only) {
@@ -243,6 +245,8 @@ void WebSync::Next() {
     queue.pop_front();
     if (!SignedInNow(current->tool)) live[current->tool] = L"Checking sign-in";
     injected = false;
+    moreToRead = false;
+    visitAccount.clear();
     stored = 0;
     failures = 0;
     lastError.clear();
@@ -263,6 +267,13 @@ void WebSync::Finish(std::wstring const& result) {
             else if (!outcome.signedIn && outcome.problem.empty()) outcome.problem = result;
         }
         outcome.read += stored;
+        // Read a batch and there is more: come back after the other sites.
+        if (moreToRead && result.empty() && ++rounds < 400) {
+            seenAccounts.erase(visitAccount);
+            queue.push_back(current);
+            live[current->tool] = L"Signed in · " + std::to_wstring(outcome.read) + L" chats read so far; the rest after the other sites";
+        }
+        moreToRead = false;
         // Done with this site when no more of its slots are queued.
         bool more = false;
         for (auto service : queue) more = more || service->tool == current->tool;
@@ -350,11 +361,16 @@ void WebSync::OnMessage(std::wstring const& text) {
             live[current->tool] = L"Signed in as " + who + L" \u00B7 reading chats";
             report(L"", false, false);
         }
+        SaveOutcomes();  // signed in is known now; don't wait for the end of a long read
         if (!seenAccounts.insert(account).second) {
             // The same account again (an unused Google account slot): nothing more to read.
             worker->Post(L"{\"type\":\"fetch\",\"ids\":[]}");
             return;
         }
+        visitAccount = account;
+        // ChatGPT reads slowly (it rate-limits), so its batches are smaller.
+        const int batch = current->tool == Tool::ChatGptWeb ? 120 : 200;
+        int wanted = 0;
         auto known = index.KnownWeb(account);
         std::vector<std::string> present;
         std::string ids = "{\"type\":\"fetch\",\"ids\":[";
@@ -365,9 +381,14 @@ void WebSync::OnMessage(std::wstring const& text) {
                 if (id.empty()) continue;
                 present.push_back(id);
                 int64_t updated = ParseIsoMs(item.Str("updated"));
+                if (updated) listedUpdated[id] = updated;
                 auto it = known.find(id);
                 // Read conversations that are new or changed since the last sync.
                 if (it == known.end() || (updated && it->second != updated)) {
+                    if (++wanted > batch) {
+                        moreToRead = true;
+                        continue;
+                    }
                     ids += (first ? "" : ",") + JsonString(id);
                     first = false;
                 }
@@ -401,6 +422,8 @@ void WebSync::OnMessage(std::wstring const& text) {
             }
         }
         if (c.id.empty()) return;
+        // Stored with the time the list gave, so the next sync sees it as unchanged.
+        if (auto it = listedUpdated.find(c.id); it != listedUpdated.end() && it->second >= c.created) c.updated = it->second;
         try {
             Transaction transaction(index.Database());
             index.StoreWeb(c);

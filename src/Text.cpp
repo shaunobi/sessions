@@ -165,6 +165,22 @@ bool IsInjectedContext(std::string_view text) {
     return text.empty();
 }
 
+std::string OwnWords(std::string_view text) {
+    if (IsInjectedContext(text)) return {};
+    std::string out(text);
+    std::string_view view(out);
+    while (!view.empty() && (view.front() == ' ' || view.front() == '\n' || view.front() == '\r')) view.remove_prefix(1);
+    if (!view.empty() && view.front() == '<') out = DecodeEntities(StripTags(view));
+    // Codex wraps attachments: "# Files mentioned by the user: ... ## My request: <words>".
+    constexpr std::string_view request = "## My request:";
+    if (auto at = out.find(request); at != std::string::npos && out.find("# Files mentioned by the user") != std::string::npos)
+        out = out.substr(at + request.size());
+    else if (out.find("# Files mentioned by the user") != std::string::npos)
+        return {};
+    if (IsInjectedContext(out)) return {};
+    return out;
+}
+
 std::filesystem::path HomeFolder() {
     PWSTR path{};
     std::filesystem::path out;

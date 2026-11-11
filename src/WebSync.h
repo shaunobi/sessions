@@ -72,6 +72,12 @@ private:
     };
     std::map<Tool, Outcome> outcomes;     // this run, per site
     std::set<std::string> seenAccounts;   // accounts already read this run
+    // A visit reads at most a batch of chats, then the other sites get a turn and
+    // the site comes back for the rest; so one big history never holds up the others.
+    bool moreToRead = false;
+    std::string visitAccount;
+    std::map<std::string, int64_t> listedUpdated;  // the list's time for each chat, kept as its version
+    int rounds = 0;
     void SaveOutcomes();
     std::map<Tool, std::wstring> live;
     UINT_PTR closeTimer = 0;

@@ -37,8 +37,10 @@ async function getJson(url, init) {
     // Too many requests: back off well before trying again. The site's limit is shared
     // with your own browser, so pressing on would also stop chats loading for you.
     if (r.status === 429) {
-      post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; pausing a moment' });
-      await sleep(30000 * (attempt + 1));
+      const after = parseInt(r.headers.get('retry-after') || '', 10);
+      const wait = after > 0 && after < 600 ? after * 1000 : 30000 * (attempt + 1);
+      post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; pausing ' + Math.round(wait / 1000) + ' seconds' });
+      await sleep(wait);
       continue;
     }
     if (r.status === 401 || r.status === 403) {
@@ -73,13 +75,21 @@ constexpr wchar_t Claude[] = LR"JS(
       post({ type: 'status', text: 'Claude · ' + (org.name || 'organization') + ' · listing' });
       let items = [];
       try {
-        items = await getJson('/api/organizations/' + org.uuid + '/chat_conversations');
+        const seen = new Set();
+        for (let offset = 0; offset < 100000; offset += 100) {
+          let page = await getJson('/api/organizations/' + org.uuid + '/chat_conversations?limit=100&offset=' + offset);
+          if (!Array.isArray(page)) page = page.data || [];
+          let added = 0;
+          for (const c of page) if (c && c.uuid && !seen.has(c.uuid)) { seen.add(c.uuid); items.push(c); added++; }
+          // Fewer than a page, or the site ignored paging and sent everything again.
+          if (page.length < 100 || !added) break;
+          await sleep(200);
+        }
       } catch (e) {
         if (e.signedOut) throw e;
         post({ type: 'error', text: 'Claude ' + (org.name || org.uuid) + ': ' + e.message });
         continue;
       }
-      if (!Array.isArray(items)) items = items.data || [];
       const ids = await askWhichToFetch({
         type: 'list', account, accountName: org.name || '', complete: true,
         items: items.map((c) => ({ id: 'claude:' + c.uuid, updated: toIso(c.updated_at) })),
@@ -139,8 +149,16 @@ constexpr wchar_t ChatGpt[] = LR"JS(
     for (const acct of accounts) {
       const headers = Object.assign({}, auth, acct.id ? { 'ChatGPT-Account-Id': acct.id } : {});
       const account = 'codex:' + (acct.id || (session.user && session.user.id) || '');
-      const items = [];
-      const projectOf = {};
+      let items = [];
+      let projectOf = {};
+      // Sessions reads a long history in batches and comes back for more; the list
+      // is kept for half an hour in this tab so each return doesn't list it again.
+      const cacheKey = 'sessions-list-' + account;
+      let cached = null;
+      try { cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null'); } catch (e) {}
+      if (cached && Date.now() - cached.at < 30 * 60 * 1000) {
+        items = cached.items; projectOf = cached.projectOf;
+      } else {
       post({ type: 'status', text: 'ChatGPT · listing' });
       for (const archived of [false, true]) {
         for (let offset = 0; ; offset += 100) {
@@ -170,6 +188,8 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           }
         }
       } catch (e) { if (e.signedOut) throw e; post({ type: 'error', text: 'ChatGPT projects: ' + e.message }); }
+      try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf })); } catch (e) {}
+      }
 
       const ids = await askWhichToFetch({ type: 'list', account, accountName: acct.name, complete: true, items });
       let n = 0;
@@ -189,6 +209,11 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           const messages = chain
             .filter((m) => m.author && (m.author.role === 'user' || m.author.role === 'assistant'))
             .filter((m) => !(m.metadata && m.metadata.is_visually_hidden_from_conversation))
+            // Only what was shown in the chat: not calls to tools (searches, file reads,
+            // connector paths), code run, or the "I'll check..." notes between them.
+            .filter((m) => !m.recipient || m.recipient === 'all')
+            .filter((m) => !m.channel || m.channel === 'final')
+            .filter((m) => { const t = (m.content && m.content.content_type) || 'text'; return t === 'text' || t === 'multimodal_text'; })
             .map((m) => ({ role: m.author.role, ts: toIso(m.create_time), text: textOf(m) }))
             .filter((m) => m.text && m.text.trim());
           post({ type: 'conversation', id: full, account, title: c.title || '', project: projectOf[id] || '',

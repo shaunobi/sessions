@@ -59,6 +59,7 @@ std::string Prompt(std::string text) {
     std::string_view view(text);
     while (!view.empty() && (view.front() == ' ' || view.front() == '\n')) view.remove_prefix(1);
     if (!view.empty() && view.front() == '<') text = DecodeEntities(StripTags(view));
+    if (IsInjectedContext(text)) return {};
     return text;
 }
 

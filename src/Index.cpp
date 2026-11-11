@@ -375,7 +375,16 @@ FROM sessions WHERE skipped = '' ORDER BY last_activity DESC)sql");
         bool meaningful = false;
         for (wchar_t c : row.title) meaningful = meaningful || iswalnum(c);
         if (!meaningful) row.title = query.WText(14);
-        if (row.title.empty()) row.title = L"Untitled session";
+        meaningful = false;
+        for (wchar_t c : row.title) meaningful = meaningful || iswalnum(c);
+        if (!meaningful) row.title = L"Untitled session";
+        // A first prompt used as the name: one line, cut at a word near 100 characters.
+        for (auto& c : row.title)
+            if (c == L'\n' || c == L'\r' || c == L'\t') c = L' ';
+        if (row.title.size() > 110) {
+            auto cut = row.title.rfind(L' ', 100);
+            row.title = row.title.substr(0, cut == std::wstring::npos || cut < 60 ? 100 : cut) + L"2026";
+        }
         out.push_back(std::move(row));
     }
     return out;
