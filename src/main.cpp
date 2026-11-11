@@ -255,20 +255,9 @@ constexpr wchar_t ShellMarkup[] = LR"(
           <StackPanel x:Name='AccountsPanel' Spacing='10'/>
           <TextBlock Text='Web chats' FontWeight='SemiBold' Margin='0,8,0,0'/>
           <TextBlock TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'
-                     Text='Press a site&#8217;s button to open Sessions&#8217; own browser and sign in there, exactly as in any browser. The sign-in stays in that browser (in the Browser folder next to Sessions); Sessions never sees your password and keeps no copy of it. Each check asks the site who is signed in, then reads new chats. One Claude sign-in covers all of its organizations. To add a second Google account for Gemini, sign in to it from Gemini&#8217;s account menu in that browser.'/>
-          <StackPanel Orientation='Horizontal' Spacing='8'>
-            <Button x:Name='SignInClaude' Content='Claude'/>
-            <Button x:Name='SignInChatGpt' Content='ChatGPT'/>
-            <Button x:Name='SignInGemini' Content='Gemini'/>
-          </StackPanel>
-          <StackPanel Orientation='Horizontal' Spacing='8'>
-            <TextBlock Text='Sign out:' VerticalAlignment='Center' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
-            <HyperlinkButton x:Name='SignOutClaude' Content='Claude' Padding='4,2'/>
-            <HyperlinkButton x:Name='SignOutChatGpt' Content='ChatGPT' Padding='4,2'/>
-            <HyperlinkButton x:Name='SignOutGoogle' Content='Google (Gemini)' Padding='4,2'/>
-          </StackPanel>
-          <Button x:Name='SyncWeb' Content='Check sign-ins and sync now' Style='{StaticResource AccentButtonStyle}'/>
-          <TextBlock x:Name='WebInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
+                     Text='Sign in once per site. A window opens on the site; sign in as usual and it closes by itself, then the chats come in. Sessions never sees your password. Your chats stay in sync every 30 minutes while Sessions is open.'/>
+          <StackPanel x:Name='WebSites' Spacing='8'/>
+          <HyperlinkButton x:Name='SyncWeb' Content='Check all sites again now' Padding='0,2'/>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
           <TextBlock x:Name='IndexInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <StackPanel Orientation='Horizontal' Spacing='8'>
@@ -366,7 +355,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     std::unique_ptr<sessions::WebSync> webSync;
     Microsoft::UI::Dispatching::DispatcherQueueTimer webTimer{nullptr};
     std::wstring indexMessage, webMessage;
-    TextBlock webInfo{nullptr};
+    StackPanel webSites{nullptr};
     std::vector<Tool> toolChoices;  // parallel to ToolFilter items after "All tools"
 
     std::vector<sessions::SessionRow> sessionRows;
@@ -569,31 +558,19 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         if (startQuick) ShowQuick();
         indexer->Start();
 
-        webInfo = Named<TextBlock>(shell, L"WebInfo");
+        webSites = Named<StackPanel>(shell, L"WebSites");
         webSync = std::make_unique<sessions::WebSync>(*index, [this](std::wstring const& status, bool changed, bool finished) {
             if (closing) return;
             webMessage = status;
             ShowCombinedStatus();
+            if (split && split.IsPaneOpen()) ShowWebInfo();
             if (changed) Reload();
             if (finished) {
                 if (changed && indexer) indexer->Rescan();  // learn the meaning of new web messages
                 ShowWebInfo();
             }
         });
-        Named<Button>(shell, L"SignInClaude").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ClaudeWeb); });
-        Named<Button>(shell, L"SignInChatGpt").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ChatGptWeb); });
-        Named<Button>(shell, L"SignInGemini").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::Gemini); });
-        Named<Button>(shell, L"SyncWeb").Click([this](auto&&, auto&&) { webSync->SyncAll(); });
-        auto signOut = [this](Tool tool) {
-            webSync->SignOut(tool, [this](std::wstring message) {
-                if (closing) return;
-                ShowWebInfo();
-                if (webInfo) webInfo.Text(message + L"\n\n" + webInfo.Text());
-            });
-        };
-        Named<HyperlinkButton>(shell, L"SignOutClaude").Click([signOut](auto&&, auto&&) { signOut(Tool::ClaudeWeb); });
-        Named<HyperlinkButton>(shell, L"SignOutChatGpt").Click([signOut](auto&&, auto&&) { signOut(Tool::ChatGptWeb); });
-        Named<HyperlinkButton>(shell, L"SignOutGoogle").Click([signOut](auto&&, auto&&) { signOut(Tool::Gemini); });
+        Named<HyperlinkButton>(shell, L"SyncWeb").Click([this](auto&&, auto&&) { webSync->SyncAll(); });
         webTimer = window.DispatcherQueue().CreateTimer();
         webTimer.Interval(std::chrono::seconds(20));
         webTimer.IsRepeating(true);
@@ -1535,10 +1512,101 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
     }
 
+    // One row per site: logo, who is signed in (or what to do), live progress,
+    // and the one button that makes sense next.
+    std::wstring webNotice;  // a one-off message, for example after signing out
     void ShowWebInfo() {
-        if (!webInfo || !webSync) return;
-        webInfo.Text(WebSummary(*webSync));
-        ToolTipService::SetToolTip(webInfo, box_value(WebSummary(*webSync, true)));
+        if (!webSites || !webSync) return;
+        webSites.Children().Clear();
+        for (auto const& site : webSync->Statuses()) {
+            std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : sessions::ToolName(site.tool);
+            std::wstring now = webSync->Live(site.tool);
+            std::wstring text;
+            if (!now.empty()) text = now;
+            else if (!site.checked) text = L"Not signed in yet.";
+            else if (site.signedIn) text = L"Signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L".";
+            else if (site.problem.find(L"could not reach") != std::wstring::npos || site.problem.find(L"stopped answering") != std::wstring::npos)
+                text = L"Couldn't reach the site last time; it will try again.";
+            else text = L"Not signed in.";
+            if (now.empty() && site.chats) text += L" " + Number(site.chats) + (site.chats == 1 ? L" chat in Sessions." : L" chats in Sessions.");
+            if (now.empty() && site.checkedAt > 0) text += L" Checked " + FriendlyDate(site.checkedAt) + L".";
+
+            Border card;
+            card.CornerRadius({8, 8, 8, 8});
+            card.Padding({12, 10, 12, 10});
+            card.Background(ThemeBrush(L"CardBackgroundFillColorDefaultBrush"));
+            Grid row;
+            row.ColumnSpacing(10);
+            ColumnDefinition logoColumn, textColumn, buttonColumn;
+            logoColumn.Width(GridLengthHelper::FromPixels(32));
+            textColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            buttonColumn.Width(GridLengthHelper::Auto());
+            row.ColumnDefinitions().Append(logoColumn);
+            row.ColumnDefinitions().Append(textColumn);
+            row.ColumnDefinitions().Append(buttonColumn);
+            auto logo = Badge(site.tool);
+            row.Children().Append(logo);
+            StackPanel words;
+            Grid::SetColumn(words, 1);
+            TextBlock title;
+            title.Text(name);
+            title.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+            words.Children().Append(title);
+            TextBlock state;
+            state.Text(text);
+            state.FontSize(12);
+            state.TextWrapping(TextWrapping::Wrap);
+            state.Foreground(ThemeBrush(site.signedIn || !now.empty() ? L"TextFillColorSecondaryBrush" : L"SystemFillColorCautionBrush"));
+            if (!site.problem.empty()) ToolTipService::SetToolTip(state, box_value(site.problem));
+            words.Children().Append(state);
+            row.Children().Append(words);
+
+            StackPanel actions;
+            actions.Spacing(2);
+            actions.VerticalAlignment(VerticalAlignment::Center);
+            Grid::SetColumn(actions, 2);
+            Button signIn;
+            signIn.Content(box_value(site.signedIn ? L"Switch" : L"Sign in"));
+            if (!site.signedIn) signIn.Style(Application::Current().Resources().Lookup(box_value(L"AccentButtonStyle")).as<Style>());
+            auto tool = site.tool;
+            signIn.Click([this, tool, signedIn = site.signedIn](auto&&, auto&&) {
+                if (signedIn) {
+                    // Switching account: sign out first so the site shows its account chooser.
+                    webSync->SignOut(tool, [this, tool](std::wstring) {
+                        if (!closing) webSync->SignIn(tool);
+                    });
+                } else {
+                    webSync->SignIn(tool);
+                }
+            });
+            actions.Children().Append(signIn);
+            if (site.signedIn) {
+                HyperlinkButton out;
+                out.Content(box_value(L"Sign out"));
+                out.Padding({4, 0, 4, 0});
+                out.FontSize(12);
+                out.Click([this, tool](auto&&, auto&&) {
+                    webSync->SignOut(tool, [this](std::wstring message) {
+                        if (closing) return;
+                        webNotice = message;
+                        ShowWebInfo();
+                    });
+                });
+                actions.Children().Append(out);
+            }
+            row.Children().Append(actions);
+            card.Child(row);
+            webSites.Children().Append(card);
+        }
+        if (!webNotice.empty()) {
+            TextBlock notice;
+            notice.Text(webNotice);
+            notice.FontSize(12);
+            notice.TextWrapping(TextWrapping::Wrap);
+            notice.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
+            webSites.Children().Append(notice);
+            webNotice.clear();
+        }
     }
 
     void ShowCombinedStatus() {

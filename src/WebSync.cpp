@@ -84,7 +84,10 @@ void WebSync::SignIn(Tool tool) {
     std::wstring url = service->signInUrl;
     if (!signIn) {
         signIn = std::make_unique<WebBrowser>();
-        signIn->OnClosed([this] { SyncAll(); });
+        signIn->OnClosed([this] {
+            if (closeTimer) KillTimer(nullptr, closeTimer);
+            closeTimer = 0;
+        });
         // Once a site shows a page other than its sign-in pages, sign-in is done:
         // sync straight away rather than waiting for the window to close.
         signIn->OnLoaded([this](bool ok, std::wstring const& address) {
@@ -98,10 +101,13 @@ void WebSync::SignIn(Tool tool) {
                         signIn->SetTitle(L"Sessions \u00B7 sign in to " + std::wstring(s.name));
                         return;
                     }
-                // Past the sign-in pages: say so plainly, and check right away.
-                signIn->SetTitle(L"Sessions \u00B7 " + std::wstring(s.name) +
-                                 L" sign-in done \u2014 close this window; Settings shows the account Sessions found");
-                SyncAll();
+                // Past the sign-in pages: sync this site right away and close the
+                // window shortly after, so there is nothing more to do.
+                signIn->SetTitle(L"Sessions \u00B7 signed in to " + std::wstring(s.name) + L" \u2014 syncing; this window closes itself");
+                Sync(s.tool);
+                activeSync = this;
+                if (closeTimer) KillTimer(nullptr, closeTimer);
+                closeTimer = SetTimer(nullptr, 0, 2500, CloseSignIn);
                 return;
             }
         });
@@ -158,9 +164,36 @@ void WebSync::SignOut(Tool tool, std::function<void(std::wstring)> done) {
     });
 }
 
-void WebSync::SyncAll() {
+void CALLBACK WebSync::CloseSignIn(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    auto self = activeSync;
+    if (!self) return;
+    self->closeTimer = 0;
+    if (self->signIn) self->signIn->Hide();
+}
+
+std::wstring WebSync::Live(Tool tool) const {
+    auto it = live.find(tool);
+    return it == live.end() ? std::wstring() : it->second;
+}
+
+void WebSync::Sync(std::optional<Tool> only) {
     if (running) {
-        rerun = true;  // run again when this one ends, to pick up a new sign-in
+        if (!only) {
+            rerun = true;  // run everything again when this run ends
+            return;
+        }
+        if (current && current->tool == *only) return;
+        // Jump the queue: this site next.
+        std::deque<Service const*> rest;
+        for (auto service : queue)
+            if (service->tool != *only) rest.push_back(service);
+        for (auto it = std::rbegin(Services); it != std::rend(Services); ++it)
+            if (it->tool == *only) rest.push_front(&*it);
+        queue = std::move(rest);
+        outcomes.erase(*only);
+        live[*only] = L"Waiting to sync";
+        report(L"", false, false);
         return;
     }
     running = true;
@@ -168,7 +201,8 @@ void WebSync::SyncAll() {
     outcomes.clear();
     seenAccounts.clear();
     queue.clear();
-    for (auto const& s : Services) queue.push_back(&s);
+    for (auto const& s : Services)
+        if (!only || s.tool == *only) queue.push_back(&s);
     activeSync = this;
     if (!watchdog) watchdog = SetTimer(nullptr, 0, 15000, Watchdog);
     if (!worker) {
@@ -199,6 +233,7 @@ void WebSync::Next() {
     }
     current = queue.front();
     queue.pop_front();
+    if (!live.count(current->tool) || live[current->tool] == L"Waiting to sync") live[current->tool] = L"Checking sign-in";
     injected = false;
     stored = 0;
     failures = 0;
@@ -211,8 +246,22 @@ void WebSync::Next() {
 void WebSync::Finish(std::wstring const& result) {
     if (current) {
         auto& outcome = outcomes[current->tool];
-        if (!result.empty()) outcome.problem = result;
+        // Gemini also tries extra Google account slots (/u/1, /u/2); an empty slot
+        // is not a problem with the sign-in.
+        bool extraSlot = std::wstring(current->syncUrl).find(L"/u/0/") == std::wstring::npos &&
+                         std::wstring(current->syncUrl).find(L"/u/") != std::wstring::npos;
+        if (!result.empty()) {
+            if (!extraSlot) outcome.problem = result;
+            else if (!outcome.signedIn && outcome.problem.empty()) outcome.problem = result;
+        }
         outcome.read += stored;
+        // Done with this site when no more of its slots are queued.
+        bool more = false;
+        for (auto service : queue) more = more || service->tool == current->tool;
+        if (!more) {
+            live.erase(current->tool);
+            SaveOutcomes();
+        }
     }
     Next();
 }
@@ -271,6 +320,12 @@ void WebSync::OnMessage(std::wstring const& text) {
         auto& outcome = outcomes[current->tool];
         outcome.signedIn = true;
         outcome.who.insert(index.AccountName(account));
+        {
+            std::wstring who;
+            for (auto const& name : outcome.who) who += (who.empty() ? L"" : L", ") + name;
+            live[current->tool] = L"Signed in as " + who + L" \u00B7 reading chats";
+            report(L"", false, false);
+        }
         if (!seenAccounts.insert(account).second) {
             // The same account again (an unused Google account slot): nothing more to read.
             worker->Post(L"{\"type\":\"fetch\",\"ids\":[]}");
@@ -328,6 +383,12 @@ void WebSync::OnMessage(std::wstring const& text) {
             transaction.Commit();
             ++stored;
             changed = true;
+            {
+                std::wstring who;
+                for (auto const& name : outcomes[current->tool].who) who += (who.empty() ? L"" : L", ") + name;
+                live[current->tool] = L"Signed in as " + who + L" \u00B7 " + std::to_wstring(stored) + L" new or changed chats read so far";
+                if (stored % 5 == 0) report(L"", false, false);
+            }
             if (stored % 25 == 0) report(std::wstring(current->name) + L" · " + std::to_wstring(stored) + L" conversations read", true, false);
         } catch (std::exception const& e) {
             ++failures;

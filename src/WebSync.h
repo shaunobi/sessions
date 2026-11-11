@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 #include <memory>
@@ -32,7 +33,11 @@ public:
     // account. For ChatGPT and Gemini this also signs out of Google, which they
     // sign in through. `done` receives a sentence for the person.
     void SignOut(Tool tool, std::function<void(std::wstring)> done);
-    void SyncAll();
+    void SyncAll() { Sync(std::nullopt); }
+    // Syncs one site now (ahead of anything queued), or every site.
+    void Sync(std::optional<Tool> only);
+    // What is happening with this site right now ("Reading chats · 42 so far"), or empty.
+    std::wstring Live(Tool tool) const;
     bool Running() const { return running; }
     // What Settings shows for each site, from the last check (kept across restarts).
     struct SiteStatus {
@@ -66,6 +71,9 @@ private:
     std::map<Tool, Outcome> outcomes;     // this run, per site
     std::set<std::string> seenAccounts;   // accounts already read this run
     void SaveOutcomes();
+    std::map<Tool, std::wstring> live;
+    UINT_PTR closeTimer = 0;
+    static void CALLBACK CloseSignIn(HWND, UINT, UINT_PTR, DWORD);
     UINT_PTR watchdog = 0;
     std::chrono::steady_clock::time_point lastActivity;
 
