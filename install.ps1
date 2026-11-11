@@ -7,10 +7,20 @@ param(
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $BuildRoot 'Release'
 if (!(Test-Path (Join-Path $source 'Sessions.exe'))) { & (Join-Path $PSScriptRoot 'build.ps1') -BuildRoot $BuildRoot | Out-Null }
-if (Get-Process Sessions -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$InstallFolder*" }) { throw 'Close Sessions before installing.' }
+$running = Get-Process Sessions -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$InstallFolder*" }
+if ($running) {
+    # Ask it to close (it saves its window position and shuts the web browser down cleanly).
+    # Killing it outright can damage the web sign-in profile.
+    $running | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    $running | Wait-Process -Timeout 20 -ErrorAction SilentlyContinue
+    if (Get-Process Sessions -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$InstallFolder*" }) {
+        throw 'Sessions is still running (it may be minimized to the tray). Quit it, then install again.'
+    }
+}
 New-Item -ItemType Directory -Force $InstallFolder | Out-Null
-# Mirror: files from older builds are removed; the database is never touched.
-robocopy $source $InstallFolder /MIR /XF Sessions.db Sessions.db-wal Sessions.db-shm *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
+# Mirror: files from older builds are removed. The database and the Browser folder (web sign-ins)
+# are never touched: mirroring once deleted Browser on every install, signing you out of every site.
+robocopy $source $InstallFolder /MIR /XD Browser /XF Sessions.db Sessions.db-wal Sessions.db-shm *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Copy failed (robocopy exit $LASTEXITCODE)." }
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in 'Programs', 'DesktopDirectory') {

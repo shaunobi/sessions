@@ -1,4 +1,5 @@
 #include "Launch.h"
+#include "Text.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -59,7 +60,18 @@ std::wstring WebAddress(SessionRow const& session) {
     switch (session.tool) {
     case Tool::ClaudeWeb: return L"https://claude.ai/chat/" + id;
     case Tool::ChatGptWeb: return L"https://chatgpt.com/c/" + id;
-    case Tool::Gemini: return L"https://gemini.google.com/app/" + id;
+    case Tool::Gemini: {
+        // The browser may be signed in to several Google accounts: name the one that owns the chat.
+        std::wstring address = L"https://gemini.google.com/app/" + id;
+        constexpr std::string_view prefix = "gemini:";
+        if (session.account.rfind(prefix, 0) == 0 && session.account.size() > prefix.size()) {
+            auto email = Wide(session.account.substr(prefix.size()));
+            bool plain = true;
+            for (wchar_t c : email) plain = plain && (iswalnum(c) || c == L'@' || c == L'.' || c == L'_' || c == L'-' || c == L'+');
+            if (plain) address += L"?authuser=" + email;
+        }
+        return address;
+    }
     default: return {};
     }
 }

@@ -313,6 +313,10 @@ int Index::RemoveWebMissing(std::string const& account, std::vector<std::string>
         while (q.Step())
             if (!keep.count(std::string(q.Text(0)))) gone.push_back(q.WText(1));
     }
+    // A site that answers with nothing, or with far fewer chats than before, is
+    // more likely signed out or failing than emptied: keep everything then.
+    size_t before = gone.size() + present.size();
+    if (present.empty() || (gone.size() > 5 && gone.size() * 2 > before)) return 0;
     for (auto const& path : gone) Remove(path);
     return int(gone.size());
 }

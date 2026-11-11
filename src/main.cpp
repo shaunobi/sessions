@@ -260,8 +260,8 @@ constexpr wchar_t ShellMarkup[] = LR"(
             <Button x:Name='SignInClaude' Content='Claude'/>
             <Button x:Name='SignInChatGpt' Content='ChatGPT'/>
             <Button x:Name='SignInGemini' Content='Gemini'/>
-            <Button x:Name='SyncWeb' Content='Check and sync now' Style='{StaticResource AccentButtonStyle}'/>
           </StackPanel>
+          <Button x:Name='SyncWeb' Content='Check sign-ins and sync now' Style='{StaticResource AccentButtonStyle}'/>
           <TextBlock x:Name='WebInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
           <TextBlock x:Name='IndexInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
@@ -304,23 +304,27 @@ constexpr wchar_t ShellMarkup[] = LR"(
 }  // namespace
 
 
-// One line per site for Settings: who is signed in, how many chats, when checked.
-std::wstring WebSummary(sessions::WebSync& sync) {
+// One line per site for Settings, in plain words: who is signed in and how many
+// chats Sessions has, or what to do. With `details`, the sites' own answers too
+// (shown on hover).
+std::wstring WebSummary(sessions::WebSync& sync, bool details = false) {
     std::wstring out;
     for (auto const& site : sync.Statuses()) {
-        std::wstring name = sessions::ToolName(site.tool);
-        if (site.tool == Tool::ClaudeWeb) name = L"Claude";
+        std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : sessions::ToolName(site.tool);
+        std::wstring chats = std::to_wstring(site.chats) + (site.chats == 1 ? L" chat" : L" chats") + L" in Sessions";
         std::wstring line;
         if (!site.checked) {
-            line = L"\u2013  " + name + L": not checked yet";
+            line = L"\u2013  " + name + L": not checked yet.";
         } else if (site.signedIn) {
-            line = L"\u2713  " + name + L": signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L" \u00B7 " +
-                   std::to_wstring(site.chats) + (site.chats == 1 ? L" chat" : L" chats");
-            if (!site.problem.empty()) line += L" \u00B7 " + site.problem;
+            line = L"\u2713  " + name + L": signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L". " + chats + L".";
+            if (!site.problem.empty()) line += L" Some chats could not be read; Sessions will try again.";
         } else {
-            line = L"\u2717  " + name + L": " + (site.problem.empty() ? std::wstring(L"not signed in") : site.problem);
+            bool reached = site.problem.find(L"could not reach") == std::wstring::npos && site.problem.find(L"stopped answering") == std::wstring::npos;
+            line = L"\u2717  " + name + (reached ? L": signed out. Press " + name + L" above to sign in." : L": could not reach the site; Sessions will try again.");
+            if (site.chats) line += L" " + chats + L" are kept.";
         }
-        if (site.checkedAt > 0) line += L" \u00B7 checked " + FriendlyDate(site.checkedAt);
+        if (site.checkedAt > 0) line += L" (Checked " + FriendlyDate(site.checkedAt) + L")";
+        if (details && !site.problem.empty()) line += L"\n      " + site.problem;
         out += line + L"\n";
     }
     if (!out.empty()) out.pop_back();
@@ -567,7 +571,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             if (changed) Reload();
             if (finished) {
                 if (changed && indexer) indexer->Rescan();  // learn the meaning of new web messages
-                if (webInfo) webInfo.Text(WebSummary(*webSync));
+                ShowWebInfo();
             }
         });
         Named<Button>(shell, L"SignInClaude").Click([this](auto&&, auto&&) { webSync->SignIn(Tool::ClaudeWeb); });
@@ -1504,6 +1508,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
     }
 
+    void ShowWebInfo() {
+        if (!webInfo || !webSync) return;
+        webInfo.Text(WebSummary(*webSync));
+        ToolTipService::SetToolTip(webInfo, box_value(WebSummary(*webSync, true)));
+    }
+
     void ShowCombinedStatus() {
         std::wstring text = webMessage.empty() ? indexMessage : L"Syncing " + webMessage;
         statusText.Text(text);
@@ -1532,7 +1542,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void BuildSettings() {
-        if (webInfo && webSync) webInfo.Text(WebSummary(*webSync));
+        ShowWebInfo();
         accountsPanel.Children().Clear();
         for (auto const& account : accountRows) {
             Border card;
@@ -1586,7 +1596,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             auto size = std::filesystem::file_size(databaseFile, error);
             indexInfo.Text(databaseFile.wstring() + L"\n" + Number(totals.sessions) + L" sessions, " + Number(totals.messages) +
                            L" messages, " + Number(int64_t(size / (1024 * 1024))) + L" MB. " + Number(totals.skipped) +
-                           L" helper or empty transcripts are skipped.");
+                           L" helper or empty transcripts are left out.");
         } catch (...) {
         }
     }
@@ -1711,7 +1721,7 @@ int RunWebSyncHeadless(int argc, wchar_t** argv) {
     sync = std::make_unique<sessions::WebSync>(index, [&](std::wstring const& status, bool, bool done) {
         if (!status.empty()) print(L"  " + status);
         if (done) {
-            print(WebSummary(*sync));
+            print(WebSummary(*sync, true));
             finished = true;
             PostQuitMessage(0);
         }
@@ -1745,6 +1755,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
     if (argv) LocalFree(argv);
+
+    // One copy at a time: two copies would share (and could damage) the web
+    // sign-in browser profile and the database. A second launch shows the
+    // running copy instead.
+    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\ShaunobiSessionsApp");
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND tray = FindWindowW(L"SessionsTrayWindow", nullptr);
+        if (tray) {
+            DWORD process{};
+            GetWindowThreadProcessId(tray, &process);
+            AllowSetForegroundWindow(process);
+            PostMessageW(tray, WM_APP + 41, 1, WM_CONTEXTMENU);  // same as right-clicking the tray icon: open the window
+        }
+        CloseHandle(single);
+        return 0;
+    }
     try {
         init_apartment(apartment_type::single_threaded);
         Application::Start([](auto&&) {
