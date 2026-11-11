@@ -31,8 +31,11 @@ const toIso = (v) => {
   if (typeof v === 'number') return new Date(v < 1e12 ? v * 1000 : v).toISOString();
   return String(v);
 };
-async function getJson(url, init) {
-  for (let attempt = 0; attempt < 4; attempt++) {
+// Set when a site rate-limits; the reading loops wait longer between requests while it is high.
+let throttle = 0;
+// `patient`: keep waiting out "too many requests" (up to about 12 hours) instead of giving up.
+async function getJson(url, init, patient) {
+  for (let attempt = 0; attempt < (patient ? 60 : 4); attempt++) {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), 60000);
     let r;
@@ -48,7 +51,10 @@ async function getJson(url, init) {
     // with your own browser, so pressing on would also stop chats loading for you.
     if (r.status === 429) {
       const after = parseInt(r.headers.get('retry-after') || '', 10);
-      const wait = after > 0 && after < 600 ? after * 1000 : 30000 * (attempt + 1);
+      throttle = Math.min(throttle + 1, 6);
+      // Waits grow 1, 2, 4, 8 minutes, then stay at 15: an hourly quota needs time to refill.
+      const backoff = Math.min(60000 * Math.pow(2, attempt), 15 * 60000);
+      const wait = after > 0 && after < 3600 ? Math.max(after * 1000, 30000) : backoff;
       // Say so every half minute while waiting, so Sessions knows the sync is alive.
       for (let left = wait; left > 0; left -= 30000) {
         post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; resuming in ' + Math.round(left / 1000) + ' seconds' });
@@ -218,7 +224,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
       for (const full of ids) {
         const id = full.replace(/^chatgpt:/, '');
         try {
-          const c = await getJson('/backend-api/conversation/' + id, { headers });
+          const c = await getJson('/backend-api/conversation/' + id, { headers }, true);
           // Follow the branch that is shown, from the current message back to the start.
           const chain = [];
           let node = c.current_node;
@@ -245,7 +251,13 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           post({ type: 'error', text: 'ChatGPT conversation ' + id + ': ' + e.message });
         }
         if (++n % 10 === 0) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length });
-        await sleep(5000);  // ChatGPT rate-limits conversation reads; one every 5 s stays well under it (about 700 an hour)
+        // ChatGPT rate-limits conversation reads: one every 5 s normally, slower for a while
+        // after it has asked Sessions to slow down (10, 20, 40 s ... up to 5 minutes).
+        for (let gap = throttle ? Math.min(5000 * Math.pow(2, throttle), 300000) : 5000; gap > 0; gap -= 30000) {
+          if (gap > 30000) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length + ' · going slowly; ChatGPT asked for fewer requests' });
+          await sleep(Math.min(gap, 30000));
+        }
+        if (throttle && n % 20 === 0) throttle--;
       }
     }
     post({ type: 'done' });
