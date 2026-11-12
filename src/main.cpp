@@ -241,7 +241,7 @@ constexpr wchar_t ShellMarkup[] = LR"(
       </Button>
     </StackPanel>
   </Grid>
-  <SplitView x:Name='Split' Grid.Row='1' PanePlacement='Right' DisplayMode='Overlay' OpenPaneLength='380' IsPaneOpen='False'
+  <SplitView x:Name='Split' Grid.Row='1' PanePlacement='Right' DisplayMode='Overlay' OpenPaneLength='480' IsPaneOpen='False'
              PaneBackground='{ThemeResource AcrylicInAppFillColorDefaultBrush}'>
     <SplitView.Pane>
       <ScrollViewer HorizontalScrollBarVisibility='Disabled'>
@@ -262,9 +262,9 @@ constexpr wchar_t ShellMarkup[] = LR"(
           <HyperlinkButton x:Name='SyncWeb' Content='Check all sites again now' Padding='0,2'/>
           <TextBlock TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' Margin='0,4,0,0'
                      Text='ChatGPT lets Sessions open only so many chats an hour, so a long history fills in slowly. To load it all at once, ask ChatGPT for your data (Settings, Data controls, Export data), then choose the zip it emails you.'/>
-          <StackPanel Orientation='Horizontal' Spacing='8'>
+          <StackPanel Spacing='6'>
             <Button x:Name='ImportChatGpt' Content='Load a ChatGPT export'/>
-            <TextBlock x:Name='ImportInfo' VerticalAlignment='Center' FontSize='12' TextWrapping='Wrap' MaxWidth='240'
+            <TextBlock x:Name='ImportInfo' FontSize='12' TextWrapping='Wrap'
                        Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
           </StackPanel>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
