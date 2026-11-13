@@ -499,11 +499,17 @@ void WebSync::OnMessage(std::wstring const& text) {
             }
         }
         if (c.id.empty()) return;
+        if (c.messages.empty()) c.titleOnly = true;  // nothing readable (yet): keep it by name
         // Stored with the time the list gave, so the next sync sees it as unchanged.
         if (auto it = listedUpdated.find(c.id); it != listedUpdated.end() && it->second >= c.created) c.updated = it->second;
         try {
             Transaction transaction(index.Database());
             index.StoreWeb(c);
+            if (c.titleOnly && c.updated) {
+                // Read, just nothing to show: don't read it again until it changes.
+                auto version = index.Database().Prepare("UPDATE sessions SET file_modified = ?1 WHERE path = ?2");
+                version.Bind(1, c.updated).Bind(2, "web:" + c.id).Run();
+            }
             transaction.Commit();
             ++stored;
             changed = true;

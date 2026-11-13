@@ -56,8 +56,11 @@ std::string TextOf(json::Value const& message) {
     if (!content) return {};
     if (auto parts = content->Get("parts"); parts && parts->IsArray()) {
         std::string out;
-        for (auto const& p : parts->array)
-            if (p.IsString() && !p.string.empty()) out += (out.empty() ? "" : "\n\n") + p.string;
+        for (auto const& p : parts->array) {
+            // Voice chats keep what was said as {content_type: audio_transcription, text}.
+            std::string piece = p.IsString() ? p.string : std::string(p.Str("text"));
+            if (!piece.empty()) out += (out.empty() ? "" : "\n\n") + piece;
+        }
         return out;
     }
     return std::string(content->Str("text"));
@@ -149,6 +152,14 @@ ImportResult ImportChatGptExport(fs::path const& database, fs::path const& sourc
     }
     if (account.empty()) account = "codex:export";
     auto known = index.KnownWeb(account);
+    // Stored without messages (listed by name only, or read as empty before voice chats
+    // were understood): always take the export's copy.
+    {
+        auto q = index.Database().Prepare(
+            "SELECT external_id FROM sessions WHERE family = 3 AND tool = ?1 AND (message_count = 0 OR skipped != '')");
+        q.Bind(1, int64_t(Tool::ChatGptWeb));
+        while (q.Step()) known.erase(std::string(q.Text(0)));
+    }
 
     for (auto const& file : files) {
         std::string text = ReadAll(file);

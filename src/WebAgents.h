@@ -162,7 +162,9 @@ constexpr wchar_t ChatGpt[] = LR"JS(
 
     const textOf = (message) => {
       const c = message.content || {};
-      if (Array.isArray(c.parts)) return c.parts.filter((p) => typeof p === 'string').join('\n\n');
+      // Voice chats keep what was said as {content_type: 'audio_transcription', text}.
+      if (Array.isArray(c.parts)) return c.parts.map((p) => typeof p === 'string' ? p : (p && typeof p.text === 'string' ? p.text : ''))
+                                               .filter(Boolean).join('\n\n');
       if (typeof c.text === 'string') return c.text;
       return '';
     };
