@@ -16,7 +16,7 @@ $lines = Get-Content $output -Encoding UTF8 | Where-Object { $_ -notmatch '^Inde
 $lines
 $failures = @()
 if ($process.ExitCode -ne 0) { $failures += "exit code $($process.ExitCode)" }
-foreach ($tool in 'Claude app', 'Claude CLI', 'Codex app', 'Codex CLI') {
+foreach ($tool in 'Claude desktop', 'Claude CLI', 'Codex desktop', 'Codex CLI') {
     $line = $lines | Where-Object { $_ -like "${tool}: *" }
     if (-not $line -or [int]($line -replace '.*: ', '') -le 0) { $failures += "no $tool sessions" }
 }
