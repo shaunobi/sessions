@@ -191,7 +191,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           const page = await getJson('/backend-api/conversations?offset=' + offset + '&limit=100&order=updated&is_archived=' + archived, { headers });
           const list = page.items || [];
           for (const c of list) items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time), created: toIso(c.create_time), title: c.title || '' });
-          post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
+          post({ type: 'status', text: partial ? 'ChatGPT · checking for new chats' : 'ChatGPT · listing all chats (once a day) · ' + items.length + ' so far' });
           if (list.length < 100 || offset > 50000 || (partial && older(list))) break;
           await sleep(300);
         }
@@ -214,7 +214,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
               items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time), created: toIso(c.create_time), title: c.title || '', project: name });
               projectOf[c.id] = name;
             }
-            post({ type: 'status', text: 'ChatGPT · listing · ' + items.length + ' found' });
+            post({ type: 'status', text: partial ? 'ChatGPT · checking for new chats' : 'ChatGPT · listing all chats (once a day) · ' + items.length + ' so far' });
             if (!list.length || (partial && older(list))) break;
             cursor = page.cursor;
             await sleep(300);
