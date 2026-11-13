@@ -440,7 +440,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         appIcon.Set(window);
         window.SystemBackdrop(DesktopAcrylicBackdrop());
         shell = Xaml(ShellMarkup);
-        window.Content(shell);
+        window.Content(Scaled(shell));
+        // The cursor starts in the search box whenever the window comes forward.
+        window.Activated([this](auto&&, WindowActivatedEventArgs const& e) {
+            if (e.WindowActivationState() != WindowActivationState::Deactivated && search && split && !split.IsPaneOpen())
+                search.Focus(FocusState::Programmatic);
+        });
         window.ExtendsContentIntoTitleBar(true);
         window.AppWindow().TitleBar().PreferredHeightOption(TitleBarHeightOption::Tall);
         window.SetTitleBar(Named<Grid>(shell, L"TitleArea"));
@@ -1109,6 +1114,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         window.as<IWindowNative>()->get_WindowHandle(&handle);
         double scale = handle ? GetDpiForWindow(handle) / 96.0 : 1.0;
         if (shell.XamlRoot()) scale = shell.XamlRoot().RasterizationScale();
+        scale *= UiScale;  // logos are decoded at the size they are finally drawn
         if (scale == logoScale) return;
         logoScale = scale;
         auto pixels = [scale](double size) { return int(std::lround(size * scale)); };
@@ -1390,6 +1396,25 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
 
     // ---- Tray and quick search ------------------------------------------
 
+    // Everything is drawn 12% larger than Windows' own scale: the content is laid out in a
+    // proportionally smaller space and magnified to fill the window (text stays sharp).
+    static constexpr double UiScale = 1.12;
+    static UIElement Scaled(FrameworkElement const& content) {
+        Grid host;
+        content.HorizontalAlignment(HorizontalAlignment::Left);
+        content.VerticalAlignment(VerticalAlignment::Top);
+        ScaleTransform scale;
+        scale.ScaleX(UiScale);
+        scale.ScaleY(UiScale);
+        content.RenderTransform(scale);
+        host.Children().Append(content);
+        host.SizeChanged([content](auto&&, SizeChangedEventArgs const& e) {
+            content.Width(e.NewSize().Width / UiScale);
+            content.Height(e.NewSize().Height / UiScale);
+        });
+        return host;
+    }
+
     void ShowMain() {
         if (closing) return;
         HideQuick();
@@ -1431,7 +1456,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         quick.Title(L"Sessions search");
         quick.SystemBackdrop(DesktopAcrylicBackdrop());
         quickRoot = Xaml(QuickMarkup);
-        quick.Content(quickRoot);
+        quick.Content(Scaled(quickRoot));
         quickBox = Named<TextBox>(quickRoot, L"QuickBox");
         quickList = Named<ListView>(quickRoot, L"QuickList");
         quickHint = Named<TextBlock>(quickRoot, L"QuickHint");
