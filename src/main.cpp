@@ -236,6 +236,10 @@ constexpr wchar_t ShellMarkup[] = LR"(
       <FontIcon x:Name='Done' Glyph='&#xE73E;' FontSize='13' Foreground='{ThemeResource SystemFillColorSuccessBrush}' Visibility='Collapsed'/>
       <FontIcon x:Name='Problem' Glyph='&#xE7BA;' FontSize='13' Foreground='{ThemeResource SystemFillColorCautionBrush}' Visibility='Collapsed'/>
       <TextBlock x:Name='Status' FontSize='12' VerticalAlignment='Center' Foreground='{ThemeResource TextFillColorSecondaryBrush}' Text='Starting'/>
+      <Button x:Name='SyncNow' Width='32' Height='32' Padding='0' Background='Transparent' BorderThickness='0' AutomationProperties.Name='Check for new sessions'
+              ToolTipService.ToolTip='Check every source for new sessions now'>
+        <FontIcon Glyph='&#xE895;' FontSize='14'/>
+      </Button>
       <Button x:Name='Gear' Width='32' Height='32' Padding='0' Background='Transparent' BorderThickness='0' AutomationProperties.Name='Settings' ToolTipService.ToolTip='Settings'>
         <FontIcon Glyph='&#xE713;' FontSize='14'/>
       </Button>
@@ -509,6 +513,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             searchDelay.Start();
         });
 
+        // The lightest check of every source: files on this PC, then one small request per site.
+        Named<Button>(shell, L"SyncNow").Click([this](auto&&, auto&&) {
+            if (indexer) indexer->Rescan();
+            if (webSync) webSync->SyncAll(true);
+            if (webSync2 && SecondChatGptUsed()) webSync2->SyncAll(true);
+        });
         Named<Button>(shell, L"Gear").Click([this](auto&&, auto&&) { ToggleSettings(); });
         Named<Button>(shell, L"CloseSettings").Click([this](auto&&, auto&&) { split.IsPaneOpen(false); });
         Named<Button>(shell, L"RebuildAll").Click([this](auto&&, auto&&) {
