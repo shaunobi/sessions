@@ -31,6 +31,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include "AppIcon.h"
 #include "AppTheme.h"
 #include "Embedded.h"
@@ -922,13 +923,25 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             ids.push_back(row->id);
             elements.push_back(box_value(row->id));
         }
+        // What the list is showing: the same search, filters and sort means a live update.
+        std::wstring context = activeQuery + L"\x1F" + std::to_wstring(toolFilter.SelectedIndex()) + L"\x1F" +
+                               std::to_wstring(accountFilter.SelectedIndex()) + L"\x1F" + std::to_wstring(tagFilter.SelectedIndex()) + L"\x1F" +
+                               std::to_wstring(sort);
+        const bool live = context == shownContext && !shown.empty();
+        shownContext = context;
+        bool replaced = false;
         if (ids != shown) {
-            // A new search or filter starts at the top; a live update keeps its place.
-            bool newList = shown.empty() || ids.empty() || ids.front() != shown.front();
-            items.ReplaceAll(elements);
+            // A live update (a session gained a message, a chat arrived) moves, adds or removes
+            // just those cards, and the list keeps its place. Anything bigger, or a new
+            // search or filter, replaces the list and starts at the top.
+            if (!(live && ApplyChanges(ids))) {
+                items.ReplaceAll(elements);
+                replaced = true;
+                if (!live && items.Size() > 0) cards.ScrollIntoView(items.GetAt(0));
+            }
             shown = std::move(ids);
-            if (newList && items.Size() > 0) cards.ScrollIntoView(items.GetAt(0));
-        } else {
+        }
+        if (!replaced) {
             // Same cards in the same order: refresh the ones on screen (new titles, counts, snippets).
             for (uint32_t i = 0; i < items.Size(); ++i)
                 if (auto container = cards.ContainerFromIndex(int32_t(i)).try_as<Primitives::SelectorItem>())
@@ -959,6 +972,33 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         } else {
             emptyText.Visibility(Visibility::Collapsed);
         }
+    }
+
+    std::wstring shownContext;
+    // Turns the list on screen into `ids` with a few moves, insertions and removals.
+    // False (list left partly changed; the caller replaces it) when the change is not small.
+    bool ApplyChanges(std::vector<int64_t> const& ids) {
+        constexpr size_t most = 40;
+        size_t changes = 0;
+        std::unordered_set<int64_t> next(ids.begin(), ids.end());
+        for (size_t i = shown.size(); i-- > 0;)
+            if (!next.count(shown[i])) {
+                if (++changes > most) return false;
+                items.RemoveAt(uint32_t(i));
+                shown.erase(shown.begin() + ptrdiff_t(i));
+            }
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i < shown.size() && shown[i] == ids[i]) continue;
+            if (++changes > most) return false;
+            auto it = std::find(shown.begin() + ptrdiff_t(std::min(i, shown.size())), shown.end(), ids[i]);
+            if (it != shown.end()) {
+                items.RemoveAt(uint32_t(it - shown.begin()));
+                shown.erase(it);
+            }
+            items.InsertAt(uint32_t(i), box_value(ids[i]));
+            shown.insert(shown.begin() + ptrdiff_t(i), ids[i]);
+        }
+        return shown == ids;
     }
 
     std::wstring SnippetFor(sessions::SessionRow const& row) {
