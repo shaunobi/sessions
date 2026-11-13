@@ -14,11 +14,11 @@ namespace fs = std::filesystem;
 wchar_t const* ToolName(Tool tool) {
     switch (tool) {
     case Tool::ClaudeDesktop: return L"Claude app";
-    case Tool::ClaudeCli: return L"Claude Code (terminal)";
+    case Tool::ClaudeCli: return L"Claude CLI";
     case Tool::CodexDesktop: return L"Codex app";
-    case Tool::CodexCli: return L"Codex (terminal)";
+    case Tool::CodexCli: return L"Codex CLI";
     case Tool::AntigravityDesktop: return L"Antigravity app";
-    case Tool::AntigravityCli: return L"Antigravity (terminal)";
+    case Tool::AntigravityCli: return L"Antigravity CLI";
     case Tool::ClaudeWeb: return L"Claude (web)";
     case Tool::ChatGptWeb: return L"ChatGPT (web)";
     case Tool::Gemini: return L"Gemini (web)";
