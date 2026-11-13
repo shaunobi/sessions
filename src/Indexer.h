@@ -36,7 +36,7 @@ public:
     void RebuildAll();
 
     // One synchronous catch-up scan, for the command-line test mode.
-    static IndexStatus RunOnce(std::filesystem::path const& database, Callback const& callback);
+    static IndexStatus RunOnce(std::filesystem::path const& database, Callback const& callback, bool embed = true);
 
 private:
     std::filesystem::path database;

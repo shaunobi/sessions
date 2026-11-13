@@ -1,10 +1,14 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <shlwapi.h>
+#include <shcore.h>
+#include <commdlg.h>
 #undef GetCurrentTime
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.System.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.UI.Xaml.Interop.h>
 #include <winrt/Microsoft.UI.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
@@ -20,18 +24,27 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Microsoft.UI.Xaml.XamlTypeInfo.h>
+#include <microsoft.ui.xaml.window.h>
 #include <algorithm>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include "AppIcon.h"
 #include "AppTheme.h"
+#include "Embedded.h"
+#include "ResourceIds.h"
 #include "Index.h"
 #include "Indexer.h"
+#include "Embedder.h"
 #include "Launch.h"
+#include "Search.h"
+#include "ChatGptImport.h"
 #include "Text.h"
+#include "TrayIcon.h"
+#include "WebSync.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
@@ -113,15 +126,41 @@ ToolLook LookOf(Tool tool) {
     case Tool::ClaudeCli: return {Rgb(0xB8, 0x5C, 0x3E), L""};
     case Tool::CodexDesktop: return {Rgb(0x10, 0xA3, 0x7F), L""};
     case Tool::CodexCli: return {Rgb(0x0B, 0x7A, 0x5F), L""};
+    case Tool::ClaudeWeb: return {Rgb(0xD9, 0x77, 0x57), L""};
+    case Tool::ChatGptWeb: return {Rgb(0x10, 0xA3, 0x7F), L""};
+    case Tool::Gemini: return {Rgb(0x42, 0x85, 0xF4), L""};
+    case Tool::AntigravityDesktop: return {Rgb(0x20, 0x21, 0x24), L""};
+    case Tool::AntigravityCli: return {Rgb(0x20, 0x21, 0x24), L""};
     }
     return {Rgb(0x60, 0x60, 0x60), L""};
 }
 
-struct Found {
-    int64_t session = 0;
-    double score = 0;
-    std::wstring snippet;
-};
+using sessions::Found;
+
+// A PNG embedded in the executable as an image source; nullptr when missing.
+// `pixels` is the exact number of screen pixels it will cover (its size in
+// layout units times the display scale). The large source is scaled down once
+// to that size, so it is drawn 1:1: neither shrunk at draw time (jagged) nor
+// decoded too small and stretched (blurry).
+Imaging::BitmapImage EmbeddedImage(int id, int pixels = 0) {
+    auto bytes = sessions::EmbeddedFile(id);
+    if (bytes.empty()) return nullptr;
+    com_ptr<IStream> memory;
+    memory.attach(SHCreateMemStream(reinterpret_cast<BYTE const*>(bytes.data()), UINT(bytes.size())));
+    if (!memory) return nullptr;
+    winrt::Windows::Storage::Streams::IRandomAccessStream stream{nullptr};
+    if (FAILED(CreateRandomAccessStreamOverStream(memory.get(), BSOS_DEFAULT, guid_of<winrt::Windows::Storage::Streams::IRandomAccessStream>(),
+                                                  put_abi(stream))))
+        return nullptr;
+    Imaging::BitmapImage image;
+    if (pixels > 0) {
+        image.DecodePixelType(Imaging::DecodePixelType::Physical);
+        image.DecodePixelWidth(pixels);
+        image.DecodePixelHeight(pixels);
+    }
+    image.SetSource(stream);
+    return image;
+}
 
 // Runs searches on its own thread and database connection so typing never waits
 // on the index. Only the latest query's results are delivered.
@@ -159,7 +198,7 @@ private:
     uint64_t generation = 0;
 
     void Run() {
-        std::unique_ptr<sessions::Index> index;
+        std::unique_ptr<sessions::HybridSearch> search;
         for (;;) {
             std::wstring query;
             uint64_t ticket{};
@@ -173,13 +212,8 @@ private:
             }
             std::vector<Found> results;
             try {
-                if (!index) index = std::make_unique<sessions::Index>(file);
-                auto hits = index->Search(query);
-                for (size_t i = 0; i < hits.size(); ++i) {
-                    Found found{hits[i].session, hits[i].score, {}};
-                    if (i < 300) found.snippet = index->Snippet(query, hits[i].bestMessage);
-                    results.push_back(std::move(found));
-                }
+                if (!search) search = std::make_unique<sessions::HybridSearch>(file);
+                results = search->Run(query);
             } catch (...) {
             }
             deliver(ticket, query, std::move(results));
@@ -203,12 +237,16 @@ constexpr wchar_t ShellMarkup[] = LR"(
       <FontIcon x:Name='Done' Glyph='&#xE73E;' FontSize='13' Foreground='{ThemeResource SystemFillColorSuccessBrush}' Visibility='Collapsed'/>
       <FontIcon x:Name='Problem' Glyph='&#xE7BA;' FontSize='13' Foreground='{ThemeResource SystemFillColorCautionBrush}' Visibility='Collapsed'/>
       <TextBlock x:Name='Status' FontSize='12' VerticalAlignment='Center' Foreground='{ThemeResource TextFillColorSecondaryBrush}' Text='Starting'/>
+      <Button x:Name='SyncNow' Width='32' Height='32' Padding='0' Background='Transparent' BorderThickness='0' AutomationProperties.Name='Check for new sessions'
+              ToolTipService.ToolTip='Check every source for new sessions now'>
+        <FontIcon Glyph='&#xE895;' FontSize='14'/>
+      </Button>
       <Button x:Name='Gear' Width='32' Height='32' Padding='0' Background='Transparent' BorderThickness='0' AutomationProperties.Name='Settings' ToolTipService.ToolTip='Settings'>
         <FontIcon Glyph='&#xE713;' FontSize='14'/>
       </Button>
     </StackPanel>
   </Grid>
-  <SplitView x:Name='Split' Grid.Row='1' PanePlacement='Right' DisplayMode='Overlay' OpenPaneLength='380' IsPaneOpen='False'
+  <SplitView x:Name='Split' Grid.Row='1' PanePlacement='Right' DisplayMode='Overlay' OpenPaneLength='480' IsPaneOpen='False'
              PaneBackground='{ThemeResource AcrylicInAppFillColorDefaultBrush}'>
     <SplitView.Pane>
       <ScrollViewer HorizontalScrollBarVisibility='Disabled'>
@@ -222,6 +260,18 @@ constexpr wchar_t ShellMarkup[] = LR"(
           <TextBlock Text='Accounts' FontWeight='SemiBold'/>
           <TextBlock Text='Name each account as you know it. Rebuild re-reads that account&#8217;s sessions from disk.' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
           <StackPanel x:Name='AccountsPanel' Spacing='10'/>
+          <TextBlock Text='Web chats' FontWeight='SemiBold' Margin='0,8,0,0'/>
+          <TextBlock TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'
+                     Text='Sign in once per site. A window opens on the site; sign in as usual and it closes by itself, then the chats come in. Sessions never sees your password. Your chats stay in sync every 30 minutes while Sessions is open.'/>
+          <StackPanel x:Name='WebSites' Spacing='8'/>
+          <HyperlinkButton x:Name='SyncWeb' Content='Check all sites again now' Padding='0,2'/>
+          <TextBlock TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' Margin='0,4,0,0'
+                     Text='ChatGPT lets Sessions open only so many chats an hour, so a long history fills in slowly. To load it all at once, ask ChatGPT for your data (Settings, Data controls, Export data), then choose the zip it emails you.'/>
+          <StackPanel Spacing='6'>
+            <Button x:Name='ImportChatGpt' Content='Load a ChatGPT export'/>
+            <TextBlock x:Name='ImportInfo' FontSize='12' TextWrapping='Wrap'
+                       Foreground='{ThemeResource TextFillColorSecondaryBrush}'/>
+          </StackPanel>
           <TextBlock Text='Index' FontWeight='SemiBold' Margin='0,8,0,0'/>
           <TextBlock x:Name='IndexInfo' TextWrapping='Wrap' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}' IsTextSelectionEnabled='True'/>
           <StackPanel Orientation='Horizontal' Spacing='8'>
@@ -233,7 +283,7 @@ constexpr wchar_t ShellMarkup[] = LR"(
     </SplitView.Pane>
     <Grid>
       <Grid.RowDefinitions><RowDefinition Height='Auto'/><RowDefinition Height='Auto'/><RowDefinition Height='*'/></Grid.RowDefinitions>
-      <TextBox x:Name='Search' Margin='24,4,24,10' PlaceholderText='Search what you or the AI said' AutomationProperties.Name='Search sessions'/>
+      <TextBox x:Name='Search' Margin='24,4,24,10' PlaceholderText='Search what you or the AI said' AutomationProperties.Name='Search sessions' IsSpellCheckEnabled='False'/>
       <Grid Grid.Row='1' Margin='24,0,24,10' ColumnSpacing='8'>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width='Auto'/><ColumnDefinition Width='Auto'/><ColumnDefinition Width='Auto'/><ColumnDefinition Width='Auto'/><ColumnDefinition Width='*'/>
@@ -253,6 +303,9 @@ constexpr wchar_t ShellMarkup[] = LR"(
             <Setter Property='MinHeight' Value='0'/>
           </Style>
         </GridView.ItemContainerStyle>
+        <GridView.ItemTemplate>
+          <DataTemplate><Border/></DataTemplate>
+        </GridView.ItemTemplate>
       </GridView>
       <TextBlock x:Name='Empty' Grid.Row='2' HorizontalAlignment='Center' VerticalAlignment='Center' Visibility='Collapsed'
                  Foreground='{ThemeResource TextFillColorSecondaryBrush}' TextWrapping='Wrap' TextAlignment='Center' MaxWidth='420'/>
@@ -261,6 +314,34 @@ constexpr wchar_t ShellMarkup[] = LR"(
 </Grid>)";
 
 }  // namespace
+
+
+// One line per site for Settings, in plain words: who is signed in and how many
+// chats Sessions has, or what to do. With `details`, the sites' own answers too
+// (shown on hover).
+std::wstring WebSummary(sessions::WebSync& sync, bool details = false) {
+    std::wstring out;
+    for (auto const& site : sync.Statuses()) {
+        std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : site.tool == Tool::ChatGptWeb ? L"ChatGPT" : L"Gemini";
+        std::wstring chats = std::to_wstring(site.chats) + (site.chats == 1 ? L" chat" : L" chats") + L" in Sessions";
+        std::wstring line;
+        if (!site.checked) {
+            line = L"\u2013  " + name + L": not checked yet.";
+        } else if (site.signedIn) {
+            line = L"\u2713  " + name + L": signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L". " + chats + L".";
+            if (!site.problem.empty()) line += L" Some chats could not be read; Sessions will try again.";
+        } else {
+            bool reached = site.problem.find(L"could not reach") == std::wstring::npos && site.problem.find(L"stopped answering") == std::wstring::npos;
+            line = L"\u2717  " + name + (reached ? L": signed out. Press " + name + L" above to sign in." : L": could not reach the site; Sessions will try again.");
+            if (site.chats) line += L" " + chats + L" are kept.";
+        }
+        if (site.checkedAt > 0) line += L" (Checked " + FriendlyDate(site.checkedAt) + L")";
+        if (details && !site.problem.empty()) line += L"\n      " + site.problem;
+        out += line + L"\n";
+    }
+    if (!out.empty()) out.pop_back();
+    return out;
+}
 
 struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider provider{nullptr};
@@ -280,6 +361,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     SplitView split{nullptr};
     StackPanel accountsPanel{nullptr};
     MenuFlyout cardMenu{nullptr};
+    Imaging::BitmapImage claudeLogo{nullptr}, claudeCliLogo{nullptr}, chatgptLogo{nullptr}, geminiLogo{nullptr}, antigravityLogo{nullptr};
     Collections::IObservableVector<IInspectable> items{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer searchDelay{nullptr};
 
@@ -287,6 +369,14 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     std::unique_ptr<sessions::Index> index;
     std::unique_ptr<sessions::Indexer> indexer;
     std::unique_ptr<Searcher> searcher;
+    std::unique_ptr<sessions::WebSync> webSync;
+    std::unique_ptr<sessions::WebSync> webSync2;  // second ChatGPT account
+    // The second slot syncs only once it has been signed in to.
+    bool SecondChatGptUsed() { for (auto const& s : webSync2->Statuses()) if (s.checked) return true; return false; }
+    Microsoft::UI::Dispatching::DispatcherQueueTimer webTimer{nullptr};
+    std::wstring indexMessage, webMessage, webMessage2;
+    StackPanel webSites{nullptr};
+    std::vector<Tool> toolChoices;  // parallel to ToolFilter items after "All tools"
 
     std::vector<sessions::SessionRow> sessionRows;
     std::unordered_map<int64_t, size_t> rowById;
@@ -306,7 +396,22 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     };
     std::unordered_map<int64_t, CardCache> cardCache;
     std::vector<int64_t> shown;
-    bool closing = false, populatingFilters = false;
+    bool closing = false, populatingFilters = false, sortChosen = false;
+    bool startInTray = false, startQuick = false;
+    int64_t quickShownAt = 0;
+
+    // Tray icon and the full-screen quick search it opens.
+    sessions::TrayIcon tray;
+    Window quick{nullptr};
+    FrameworkElement quickRoot{nullptr};
+    TextBox quickBox{nullptr};
+    ListView quickList{nullptr};
+    TextBlock quickHint{nullptr};
+    Collections::IObservableVector<IInspectable> quickItems{nullptr};
+    std::unique_ptr<Searcher> quickSearcher;
+    Microsoft::UI::Dispatching::DispatcherQueueTimer quickDelay{nullptr};
+    uint64_t quickTicket = 0;
+    bool quickOpening = false;
     int lastTotal = 0;
 
     App() {
@@ -336,15 +441,17 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         appIcon.Set(window);
         window.SystemBackdrop(DesktopAcrylicBackdrop());
         shell = Xaml(ShellMarkup);
-        window.Content(shell);
+        window.Content(Scaled(shell));
+        // The cursor starts in the search box whenever the window comes forward.
+        window.Activated([this](auto&&, WindowActivatedEventArgs const& e) {
+            if (e.WindowActivationState() != WindowActivationState::Deactivated && search && split && !split.IsPaneOpen())
+                search.Focus(FocusState::Programmatic);
+        });
         window.ExtendsContentIntoTitleBar(true);
         window.AppWindow().TitleBar().PreferredHeightOption(TitleBarHeightOption::Tall);
         window.SetTitleBar(Named<Grid>(shell, L"TitleArea"));
-        const double scale = GetDpiForSystem() / 96.0;
-        window.AppWindow().Resize({int32_t(1060 * scale), int32_t(780 * scale)});
 
-        auto brand = sessions::ExecutableFolder() / L"Sessions.png";
-        Named<Image>(shell, L"BrandIcon").Source(Imaging::BitmapImage(Uri(L"file:///" + brand.generic_wstring())));
+        LoadLogos();
 
         search = Named<TextBox>(shell, L"Search");
         toolFilter = Named<ComboBox>(shell, L"ToolFilter");
@@ -365,18 +472,43 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         items = single_threaded_observable_vector<IInspectable>();
         cards.ItemsSource(items);
         cards.ItemClick([this](auto&&, ItemClickEventArgs const& e) {
-            if (auto card = e.ClickedItem().try_as<FrameworkElement>()) Open(unbox_value<int64_t>(card.Tag()));
+            if (auto id = e.ClickedItem().try_as<int64_t>()) Open(*id);
+        });
+        // Only the cards on screen exist: the list holds session ids and each card is
+        // made as its slot comes into view (thousands of sessions stay quick).
+        cards.ContainerContentChanging([this](ListViewBase const&, ContainerContentChangingEventArgs const& args) {
+            args.Handled(true);
+            auto slot = args.ItemContainer().ContentTemplateRoot().try_as<Border>();
+            if (!slot) return;
+            if (args.InRecycleQueue()) {
+                slot.Child(nullptr);
+                return;
+            }
+            auto id = args.Item().try_as<int64_t>();
+            auto row = id ? Row(*id) : nullptr;
+            try {
+                slot.Child(row ? CardFor(*row).as<UIElement>() : nullptr);
+            } catch (winrt::hresult_error const&) {
+            }
         });
         BuildCardMenu();
 
-        toolFilter.Items().Append(box_value(L"All tools"));
-        for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli})
+        toolFilter.Items().Append(box_value(L"All sources"));
+        for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli, Tool::AntigravityDesktop, Tool::AntigravityCli, Tool::ClaudeWeb, Tool::ChatGptWeb,
+                          Tool::Gemini}) {
+            toolChoices.push_back(tool);
             toolFilter.Items().Append(box_value(sessions::ToolName(tool)));
+        }
         toolFilter.SelectedIndex(0);
-        for (auto label : {L"Last activity", L"Best match", L"Created", L"Most messages"}) sortBox.Items().Append(box_value(label));
+        for (auto label : {L"Last activity", L"Best match", L"Created", L"Most messages", L"Oldest first"}) sortBox.Items().Append(box_value(label));
         sortBox.SelectedIndex(0);
-        for (auto combo : {toolFilter, accountFilter, tagFilter, sortBox})
+        for (auto combo : {toolFilter, accountFilter, tagFilter})
             combo.SelectionChanged([this](auto&&, auto&&) { if (!populatingFilters) Render(); });
+        sortBox.SelectionChanged([this](auto&&, auto&&) {
+            if (populatingFilters) return;
+            sortChosen = true;
+            Render();
+        });
 
         searchDelay = window.DispatcherQueue().CreateTimer();
         searchDelay.Interval(std::chrono::milliseconds(180));
@@ -387,12 +519,19 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             searchDelay.Start();
         });
 
+        // The lightest check of every source: files on this PC, then one small request per site.
+        Named<Button>(shell, L"SyncNow").Click([this](auto&&, auto&&) {
+            if (indexer) indexer->Rescan();
+            if (webSync) webSync->SyncAll(true);
+            if (webSync2 && SecondChatGptUsed()) webSync2->SyncAll(true);
+        });
         Named<Button>(shell, L"Gear").Click([this](auto&&, auto&&) { ToggleSettings(); });
         Named<Button>(shell, L"CloseSettings").Click([this](auto&&, auto&&) { split.IsPaneOpen(false); });
         Named<Button>(shell, L"RebuildAll").Click([this](auto&&, auto&&) {
             if (indexer) indexer->RebuildAll();
             split.IsPaneOpen(false);
         });
+        Named<Button>(shell, L"ImportChatGpt").Click([this](auto&&, auto&&) { ImportChatGpt(); });
         Named<Button>(shell, L"OpenFolder").Click([this](auto&&, auto&&) { sessions::RevealFile(databaseFile.wstring()); });
 
         AddShortcut(winrt::Windows::System::VirtualKey::F, winrt::Windows::System::VirtualKeyModifiers::Control, [this] {
@@ -406,6 +545,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
 
         databaseFile = sessions::Index::DefaultFile();
         index = std::make_unique<sessions::Index>(databaseFile);
+        RestorePlacement();
         Reload();
 
         auto queue = window.DispatcherQueue();
@@ -422,16 +562,211 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         });
 
         window.Closed([this](auto&&, auto&&) {
+            SavePlacement();
             closing = true;
             searchDelay.Stop();
+            if (quickDelay) quickDelay.Stop();
+            if (webTimer) webTimer.Stop();
+            webSync2.reset();
+            webSync.reset();
             if (indexer) indexer->Stop();
             indexer.reset();
             searcher.reset();
+            quickSearcher.reset();
+            tray.Remove();
+            if (quick) quick.Close();
             appIcon.Reset();
+            Application::Current().Exit();
         });
-        window.Activate();
-        search.Focus(FocusState::Programmatic);
+        // Minimizing puts Sessions in the notification area instead of the taskbar.
+        window.AppWindow().Changed([this](AppWindow const& sender, AppWindowChangedEventArgs const& args) {
+            if (!args.DidPresenterChange() && !args.DidSizeChange()) return;
+            auto presenter = sender.Presenter().try_as<OverlappedPresenter>();
+            if (presenter && presenter.State() == OverlappedPresenterState::Minimized) {
+                SavePlacement();
+                sender.Hide();
+            }
+        });
+        tray.Create([this] { ShowQuick(); }, [this] { ShowMain(); });
+        shell.Loaded([this](auto&&, auto&&) {
+            auto check = [this] {
+                double before = logoScale;
+                LoadLogos();
+                if (before != logoScale) {
+                    shown.clear();
+                    Render();
+                }
+            };
+            check();
+            shell.XamlRoot().Changed([check](auto&&, auto&&) { check(); });
+        });
+        if (!startInTray) {
+            window.Activate();
+            search.Focus(FocusState::Programmatic);
+        }
+        if (startQuick) ShowQuick();
         indexer->Start();
+
+        webSites = Named<StackPanel>(shell, L"WebSites");
+        webSync = std::make_unique<sessions::WebSync>(*index, [this](std::wstring const& status, bool changed, bool finished) {
+            if (closing) return;
+            // Row-only updates carry no status text; keep the last one until the run ends.
+            if (finished) webMessage.clear();
+            else if (!status.empty()) webMessage = status;
+            ShowCombinedStatus();
+            if (split && split.IsPaneOpen()) ShowWebInfo();
+            if (changed) Reload();
+            if (finished) {
+                if (changed && indexer) indexer->Rescan();  // learn the meaning of new web messages
+                ShowWebInfo();
+            }
+        });
+        // A second ChatGPT sign-in (say, a work account) in its own browser profile.
+        webSync2 = std::make_unique<sessions::WebSync>(
+            *index,
+            [this](std::wstring const& status, bool changed, bool finished) {
+                if (closing) return;
+                if (finished) webMessage2.clear();
+                else if (!status.empty()) webMessage2 = status;
+                ShowCombinedStatus();
+                if (split && split.IsPaneOpen()) ShowWebInfo();
+                if (changed) Reload();
+                if (finished) {
+                    if (changed && indexer) indexer->Rescan();
+                    ShowWebInfo();
+                }
+            },
+            sessions::ExecutableFolder() / L"Browser2", 2);
+        Named<HyperlinkButton>(shell, L"SyncWeb").Click([this](auto&&, auto&&) {
+            webSync->SyncAll(true);
+            if (SecondChatGptUsed()) webSync2->SyncAll(true);
+        });
+        webTimer = window.DispatcherQueue().CreateTimer();
+        webTimer.Interval(std::chrono::seconds(20));
+        webTimer.IsRepeating(true);
+        webTimer.Tick([this](auto&&, auto&&) {
+            webTimer.Interval(std::chrono::minutes(30));
+            if (webSync && !closing) webSync->SyncAll();
+            if (webSync2 && !closing && SecondChatGptUsed()) webSync2->SyncAll();
+        });
+        webTimer.Start();
+    }
+
+    // ---- ChatGPT export -------------------------------------------------------
+
+    std::thread importer;
+    void ImportChatGpt() {
+        if (importer.joinable()) return;  // one at a time
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        wchar_t file[MAX_PATH * 4] = L"";
+        OPENFILENAMEW dialog{sizeof(dialog)};
+        dialog.hwndOwner = handle;
+        dialog.lpstrFilter = L"ChatGPT export (*.zip; conversations.json)\0*.zip;*.json\0All files\0*.*\0";
+        dialog.lpstrFile = file;
+        dialog.nMaxFile = DWORD(std::size(file));
+        dialog.lpstrTitle = L"Choose the ChatGPT export zip";
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&dialog)) return;
+        auto info = Named<TextBlock>(shell, L"ImportInfo");
+        auto button = Named<Button>(shell, L"ImportChatGpt");
+        info.Text(L"Reading the export\u2026");
+        button.IsEnabled(false);
+        auto queue = window.DispatcherQueue();
+        auto weak = get_weak();
+        std::filesystem::path source = file;
+        auto say = [queue, weak](std::wstring text) {
+            queue.TryEnqueue([weak, text] {
+                if (auto app = weak.get(); app && !app->closing) {
+                    Named<TextBlock>(app->shell, L"ImportInfo").Text(text);
+                    app->webMessage = text;
+                    app->ShowCombinedStatus();
+                }
+            });
+        };
+        importer = std::thread([this, queue, weak, source, say] {
+            sessions::ImportResult result;
+            try {
+                result = sessions::ImportChatGptExport(databaseFile, source, say);
+            } catch (std::exception const& e) {
+                result.problem = L"Could not load it: " + sessions::Wide(e.what());
+            }
+            queue.TryEnqueue([weak, result] {
+                auto app = weak.get();
+                if (!app || app->closing) return;
+                app->importer.join();
+                std::wstring text = result.conversations
+                                        ? L"Loaded " + Number(result.conversations) + L" ChatGPT chats from the export."
+                                        : result.problem;
+                Named<TextBlock>(app->shell, L"ImportInfo").Text(text);
+                Named<Button>(app->shell, L"ImportChatGpt").IsEnabled(true);
+                app->webMessage.clear();
+                app->ShowCombinedStatus();
+                app->Reload();
+                if (app->indexer) app->indexer->Rescan();  // learn the meaning of the new messages
+            });
+        });
+    }
+
+    // ---- Window placement ---------------------------------------------------
+
+    // Opens where it was last closed, at the same size (and maximized if it was).
+    // The first time, or if that spot is no longer on any screen: centered on the
+    // screen under the pointer, wide enough for four columns of cards.
+    void RestorePlacement() {
+        auto appWindow = window.AppWindow();
+        std::string saved;
+        try { saved = index->MetaValue("window_placement"); } catch (...) {}
+        int x{}, y{}, w{}, h{}, maximized{};
+        if (sscanf_s(saved.c_str(), "%d,%d,%d,%d,%d", &x, &y, &w, &h, &maximized) == 5 && w > 200 && h > 200) {
+            auto area = DisplayArea::GetFromRect({x, y, w, h}, DisplayAreaFallback::None);
+            if (area) {
+                auto work = area.WorkArea();
+                // At least a title bar's worth must be visible.
+                bool visible = x + w > work.X + 100 && x < work.X + work.Width - 100 && y >= work.Y - 10 && y < work.Y + work.Height - 60;
+                if (visible) {
+                    appWindow.MoveAndResize({x, y, w, h});
+                    if (maximized)
+                        if (auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>()) presenter.Maximize();
+                    return;
+                }
+            }
+        }
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        auto area = DisplayArea::GetFromPoint({cursor.x, cursor.y}, DisplayAreaFallback::Primary);
+        auto work = area.WorkArea();
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        const double scale = (handle ? GetDpiForWindow(handle) : GetDpiForSystem()) / 96.0;
+        // Four 300-wide cards with their gaps, the page padding and a scroll bar.
+        int width = std::min(int(1330 * scale), work.Width - int(40 * scale));
+        int height = std::min(int(900 * scale), work.Height - int(40 * scale));
+        appWindow.MoveAndResize({work.X + (work.Width - width) / 2, work.Y + (work.Height - height) / 2, width, height});
+    }
+
+    void SavePlacement() {
+        if (!window || !index) return;
+        auto appWindow = window.AppWindow();
+        auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>();
+        if (!presenter) return;
+        int maximized = presenter.State() == OverlappedPresenterState::Maximized ? 1 : 0;
+        // The restored (not maximized) rectangle, so un-maximizing later returns to it.
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        WINDOWPLACEMENT placement{sizeof(placement)};
+        RECT r{};
+        if (handle && GetWindowPlacement(handle, &placement)) {
+            r = placement.rcNormalPosition;  // workspace coordinates; equal to screen coordinates without a top/left taskbar
+            if (presenter.State() == OverlappedPresenterState::Minimized) maximized = (placement.flags & WPF_RESTORETOMAXIMIZED) ? 1 : 0;
+        } else {
+            auto position = appWindow.Position();
+            auto size = appWindow.Size();
+            r = {position.X, position.Y, position.X + size.Width, position.Y + size.Height};
+        }
+        char text[96];
+        sprintf_s(text, "%ld,%ld,%ld,%ld,%d", r.left, r.top, r.right - r.left, r.bottom - r.top, maximized);
+        try { index->SetMetaValue("window_placement", text); } catch (...) {}
     }
 
     template <typename F>
@@ -480,7 +815,12 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         int accountIndex = 0;
         for (auto const& account : accountRows) {
             accountChoices.push_back(account.id);
-            accountFilter.Items().Append(box_value(account.name));
+            // Names alone don't say the site ("Personal" is ChatGPT, "Personal Ultra" is Claude).
+            std::wstring site = account.id.rfind("gemini:", 0) == 0        ? L"Gemini"
+                                : account.id.rfind("antigravity:", 0) == 0 ? L"Antigravity"
+                                : account.family == sessions::Family::Codex ? L"ChatGPT"
+                                                                             : L"Claude";
+            accountFilter.Items().Append(box_value(account.name.rfind(site, 0) == 0 ? account.name : site + L" \u00B7 " + account.name));
             if (account.id == selectedAccount) accountIndex = int(accountChoices.size());
         }
         accountFilter.SelectedIndex(accountIndex);
@@ -512,10 +852,13 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             activeQuery.clear();
             searching = false;
             found.clear();
+            sortChosen = false;
+            SetSort(0);
             Render();
             return;
         }
         if (query == activeQuery && !searching) return;
+        if (activeQuery.empty()) sortChosen = false;  // a fresh search starts on Best match
         searching = true;
         searchTicket = searcher->Ask(query);
         countText.Text(L"Searching…");
@@ -527,13 +870,24 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         activeQuery = query;
         found.clear();
         for (auto& result : results) found[result.session] = std::move(result);
+        SetSort(1);
         Render();
+    }
+
+    // Searching sorts by best match and clearing returns to last activity,
+    // unless the person chose a sort themselves.
+    void SetSort(int choice) {
+        if (sortChosen || sortBox.SelectedIndex() == choice) return;
+        populatingFilters = true;
+        sortBox.SelectedIndex(choice);
+        populatingFilters = false;
     }
 
     // ---- Cards ------------------------------------------------------------
 
     bool Matches(sessions::SessionRow const& row) {
-        if (int tool = toolFilter.SelectedIndex(); tool > 0 && int(row.tool) != tool) return false;
+        if (int tool = toolFilter.SelectedIndex(); tool > 0 && size_t(tool - 1) < toolChoices.size() && row.tool != toolChoices[size_t(tool - 1)])
+            return false;
         if (int account = accountFilter.SelectedIndex(); account > 0 && size_t(account - 1) < accountChoices.size() &&
             row.account != accountChoices[size_t(account - 1)])
             return false;
@@ -556,19 +910,51 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             std::stable_sort(visible.begin(), visible.end(), [](auto a, auto b) { return a->created > b->created; });
         else if (sort == 3)
             std::stable_sort(visible.begin(), visible.end(), [](auto a, auto b) { return a->messages > b->messages; });
+        else if (sort == 4)
+            std::stable_sort(visible.begin(), visible.end(), [](auto a, auto b) { return a->lastActivity < b->lastActivity; });
         else
             std::stable_sort(visible.begin(), visible.end(), byActivity);
 
-        constexpr size_t limit = 600;
         std::vector<int64_t> ids;
         std::vector<IInspectable> elements;
-        for (size_t i = 0; i < visible.size() && i < limit; ++i) {
-            ids.push_back(visible[i]->id);
-            elements.push_back(CardFor(*visible[i]));
+        ids.reserve(visible.size());
+        elements.reserve(visible.size());
+        for (auto row : visible) {
+            ids.push_back(row->id);
+            elements.push_back(box_value(row->id));
         }
+        // What the list is showing: the same search, filters and sort means a live update.
+        std::wstring context = activeQuery + L"\x1F" + std::to_wstring(toolFilter.SelectedIndex()) + L"\x1F" +
+                               std::to_wstring(accountFilter.SelectedIndex()) + L"\x1F" + std::to_wstring(tagFilter.SelectedIndex()) + L"\x1F" +
+                               std::to_wstring(sort);
+        const bool live = context == shownContext && !shown.empty();
+        shownContext = context;
+        bool replaced = false;
         if (ids != shown) {
-            items.ReplaceAll(elements);
+            // A live update (a session gained a message, a chat arrived) moves, adds or removes
+            // just those cards, and the list keeps its place. Anything bigger, or a new
+            // search or filter, replaces the list and starts at the top.
+            if (!(live && ApplyChanges(ids))) {
+                items.ReplaceAll(elements);
+                replaced = true;
+                if (!live && items.Size() > 0) cards.ScrollIntoView(items.GetAt(0));
+            }
             shown = std::move(ids);
+        }
+        if (!replaced) {
+            // Same cards in the same order: refresh the ones on screen (new titles, counts, snippets).
+            for (uint32_t i = 0; i < items.Size(); ++i)
+                if (auto container = cards.ContainerFromIndex(int32_t(i)).try_as<Primitives::SelectorItem>())
+                    if (auto slot = container.ContentTemplateRoot().try_as<Border>())
+                        if (auto row = Row(shown[i])) {
+                            // Leave a card alone when nothing it shows has changed (no flicker).
+                            auto current = slot.Child().try_as<FrameworkElement>();
+                            auto built = builtSignature.find(row->id);
+                            if (current && current.Tag() && unbox_value<int64_t>(current.Tag()) == row->id && built != builtSignature.end() &&
+                                built->second == CardSignature(*row))
+                                continue;
+                            slot.Child(CardFor(*row).as<UIElement>());
+                        }
         }
 
         std::wstring count;
@@ -576,7 +962,6 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             count = Number(int64_t(visible.size())) + (visible.size() == 1 ? L" session matches" : L" sessions match");
         else
             count = Number(int64_t(visible.size())) + (visible.size() == 1 ? L" session" : L" sessions");
-        if (visible.size() > limit) count += L" · showing the first " + Number(limit);
         countText.Text(count);
 
         if (visible.empty()) {
@@ -589,34 +974,70 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
     }
 
-    IInspectable CardFor(sessions::SessionRow const& row) {
-        std::wstring snippet;
+    std::wstring shownContext;
+    // Turns the list on screen into `ids` with a few moves, insertions and removals.
+    // False (list left partly changed; the caller replaces it) when the change is not small.
+    bool ApplyChanges(std::vector<int64_t> const& ids) {
+        constexpr size_t most = 40;
+        size_t changes = 0;
+        std::unordered_set<int64_t> next(ids.begin(), ids.end());
+        for (size_t i = shown.size(); i-- > 0;)
+            if (!next.count(shown[i])) {
+                if (++changes > most) return false;
+                items.RemoveAt(uint32_t(i));
+                shown.erase(shown.begin() + ptrdiff_t(i));
+            }
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i < shown.size() && shown[i] == ids[i]) continue;
+            if (++changes > most) return false;
+            auto it = std::find(shown.begin() + ptrdiff_t(std::min(i, shown.size())), shown.end(), ids[i]);
+            if (it != shown.end()) {
+                items.RemoveAt(uint32_t(it - shown.begin()));
+                shown.erase(it);
+            }
+            items.InsertAt(uint32_t(i), box_value(ids[i]));
+            shown.insert(shown.begin() + ptrdiff_t(i), ids[i]);
+        }
+        return shown == ids;
+    }
+
+    std::wstring SnippetFor(sessions::SessionRow const& row) {
         if (!activeQuery.empty())
-            if (auto it = found.find(row.id); it != found.end()) snippet = it->second.snippet;
-        std::wstring signature = row.title + L"\x1F" + AccountName(row.account) + L"\x1F" + std::to_wstring(row.messages) + L"\x1F" +
+            if (auto it = found.find(row.id); it != found.end()) return (it->second.byMeaning ? L"\x03" : L"") + it->second.snippet;
+        return {};
+    }
+
+    // Everything a card shows, as one string: a card is rebuilt only when this changes.
+    std::unordered_map<int64_t, std::wstring> builtSignature;
+    std::wstring CardSignature(sessions::SessionRow const& row) {
+        std::wstring snippet = SnippetFor(row);
+        std::wstring signature = row.title + L"\x1F" + row.folder + L"\x1F" + AccountName(row.account) + L"\x1F" + std::to_wstring(row.messages) + L"\x1F" +
                                  std::to_wstring(row.lastActivity) + L"\x1F" + std::to_wstring(int(row.tool)) + L"\x1F" + snippet +
                                  (row.archived ? L"\x1F" L"a" : L"");
         for (auto const& tag : row.tags) signature += L"\x1F#" + tag;
-        auto& cached = cardCache[row.id];
-        if (!cached.element) {
-            cached.element = Border();
-            cached.element.Tag(box_value(row.id));
-            cached.element.CornerRadius({8, 8, 8, 8});
-            cached.element.BorderThickness({1, 1, 1, 1});
-            cached.element.Padding({14, 12, 14, 12});
-            cached.element.Width(300);
-            cached.element.Background(ThemeBrush(L"CardBackgroundFillColorDefaultBrush"));
-            cached.element.BorderBrush(ThemeBrush(L"CardStrokeColorDefaultBrush"));
-            cached.element.ContextFlyout(cardMenu);
-        }
+        if (sortBox && sortBox.SelectedIndex() == 2) signature += L"\x1F" L"created";  // cards show the start date
+        signature += activeQuery.empty() ? L"\x1F" L"browse" : L"\x1F" L"search";  // card height differs
+        return signature;
+    }
+
+    IInspectable CardFor(sessions::SessionRow const& row) {
+        std::wstring snippet = SnippetFor(row);
+        if (builtSignature.size() > 20000) builtSignature.clear();
+        builtSignature[row.id] = CardSignature(row);
+        Border card;
+        card.Tag(box_value(row.id));
+        card.CornerRadius({8, 8, 8, 8});
+        card.BorderThickness({1, 1, 1, 1});
+        card.Padding({14, 12, 14, 12});
+        card.Width(300);
+        card.Background(ThemeBrush(L"CardBackgroundFillColorDefaultBrush"));
+        card.BorderBrush(ThemeBrush(L"CardStrokeColorDefaultBrush"));
+        card.ContextFlyout(cardMenu);
         // Uniform tiles; taller while searching to make room for the passage.
-        cached.element.Height(activeQuery.empty() ? (row.tags.empty() ? 104 : 130) : 168);
-        if (cached.signature != signature) {
-            cached.signature = signature;
-            cached.element.Child(CardContent(row, snippet));
-            Automation::AutomationProperties::SetName(cached.element, hstring(row.title + L", " + sessions::ToolName(row.tool)));
-        }
-        return cached.element;
+        card.Height((activeQuery.empty() ? 104 : 168) + (row.tags.empty() ? 0 : 34));
+        card.Child(CardContent(row, snippet));
+        Automation::AutomationProperties::SetName(card, hstring(row.title + L", " + sessions::ToolName(row.tool)));
+        return card;
     }
 
     // A fixed-size tile: badge and two-line title, then tool, account, date and
@@ -634,23 +1055,19 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         Grid header;
         header.ColumnSpacing(10);
         ColumnDefinition badgeColumn, titleColumn;
-        badgeColumn.Width(GridLengthHelper::FromPixels(28));
+        badgeColumn.Width(GridLengthHelper::FromPixels(32));
         titleColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
         header.ColumnDefinitions().Append(badgeColumn);
         header.ColumnDefinitions().Append(titleColumn);
-        auto look = LookOf(row.tool);
-        Border badge;
-        badge.Width(28);
-        badge.Height(28);
-        badge.CornerRadius({6, 6, 6, 6});
-        badge.VerticalAlignment(VerticalAlignment::Top);
-        badge.Background(SolidColorBrush(look.color));
-        FontIcon glyph;
-        glyph.Glyph(look.glyph);
-        glyph.FontSize(13);
-        glyph.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
-        badge.Child(glyph);
-        ToolTipService::SetToolTip(badge, box_value(sessions::ToolName(row.tool)));
+        auto badge = Badge(row.tool);
+        std::wstring opens = sessions::OpensInBrowser(row.tool)      ? L"Opens in your browser"
+                             : row.tool == Tool::ClaudeWeb                ? L"Opens in the Claude app"
+                             : sessions::IsCommandLine(row.tool)          ? L"Resumes in Windows Terminal"
+                             : row.tool == Tool::CodexDesktop             ? L"Opens in the Codex app"
+                             : row.tool == Tool::AntigravityDesktop       ? L"Opens the Antigravity app (it has no link to a single conversation)"
+                                                                          : L"Opens in the Claude app";
+        ToolTipService::SetToolTip(badge, box_value(std::wstring(sessions::ToolName(row.tool)) + L"  \u00B7  " + AccountName(row.account) +
+                                                    L"\n" + opens));
         header.Children().Append(badge);
         TextBlock title;
         title.Text(row.title);
@@ -675,12 +1092,30 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             meta.Children().Append(block);
             return block;
         };
-        line(std::wstring(sessions::ToolName(row.tool)) + L"  ·  " + AccountName(row.account));
-        std::wstring when = FriendlyDate(row.lastActivity) + L"  ·  " + Number(row.messages) +
-                            (row.messages == 1 ? L" message" : L" messages");
-        if (row.archived) when += L"  ·  archived";
-        auto dateLine = line(when);
-        if (row.created > 0) ToolTipService::SetToolTip(dateLine, box_value(L"Started " + FriendlyDate(row.created)));
+        const bool byCreated = sortBox && sortBox.SelectedIndex() == 2 && row.created > 0;
+        std::wstring when = (byCreated ? L"Started " + FriendlyDate(row.created) : FriendlyDate(row.lastActivity)) + L"  \u00B7  " +
+                            (row.messages == 0 ? std::wstring(L"name only, messages not read yet")
+                                               : Number(row.messages) + (row.messages == 1 ? L" message" : L" messages"));
+        if (row.archived) when += L"  \u00B7  archived";
+        auto dateLine = line(L"");
+        // Date and size first, then the folder, so a long folder name is what gets cut short.
+        Documents::Run rest;
+        rest.Text(when);
+        dateLine.Inlines().Append(rest);
+        if (!row.folder.empty()) {
+            Documents::Run gap;
+            gap.Text(L"  \u00B7  ");
+            dateLine.Inlines().Append(gap);
+            Documents::Run icon;
+            icon.Text(L"\uE8B7 ");
+            icon.FontFamily(FontFamily(L"Segoe Fluent Icons"));
+            dateLine.Inlines().Append(icon);
+            Documents::Run folder;
+            folder.Text(row.folder);
+            folder.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+            dateLine.Inlines().Append(folder);
+            ToolTipService::SetToolTip(dateLine, box_value(row.cwd.empty() ? row.folder : row.cwd));
+        }
         grid.Children().Append(meta);
 
         if (!snippet.empty()) {
@@ -711,6 +1146,132 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         return grid;
     }
 
+    // Decodes the logos for the window's current display scale; again when the
+    // window moves to a monitor with a different scale.
+    double logoScale = 0;
+    void LoadLogos() {
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        double scale = handle ? GetDpiForWindow(handle) / 96.0 : 1.0;
+        if (shell.XamlRoot()) scale = shell.XamlRoot().RasterizationScale();
+        scale *= UiScale;  // logos are decoded at the size they are finally drawn
+        if (scale == logoScale) return;
+        logoScale = scale;
+        auto pixels = [scale](double size) { return int(std::lround(size * scale)); };
+        Named<Image>(shell, L"BrandIcon").Source(EmbeddedImage(IDR_BRAND, pixels(20)));
+        claudeLogo = EmbeddedImage(IDR_LOGO_CLAUDE, pixels(32));
+        claudeCliLogo = EmbeddedImage(IDR_LOGO_CLAUDE_CLI, pixels(32));
+        chatgptLogo = EmbeddedImage(IDR_LOGO_CHATGPT, pixels(20));
+        geminiLogo = EmbeddedImage(IDR_LOGO_GEMINI, pixels(32));
+        antigravityLogo = EmbeddedImage(IDR_LOGO_ANTIGRAVITY, pixels(32));
+    }
+
+    // The tool's own logo. Command-line sessions get a terminal chip on the corner.
+    FrameworkElement Badge(Tool tool) {
+        constexpr double size = 32;
+        Grid frame;
+        frame.Width(size);
+        frame.Height(size);
+        frame.VerticalAlignment(VerticalAlignment::Top);
+        auto logo = [&](Imaging::BitmapImage const& source, double imageSize) -> UIElement {
+            Image image;
+            image.Source(source);
+            image.Width(imageSize);
+            image.Height(imageSize);
+            return image;
+        };
+        const bool cli = sessions::IsCommandLine(tool);
+        const bool web = sessions::OpensInBrowser(tool);
+        const bool chat = tool == Tool::ClaudeWeb;
+        const bool codex = tool == Tool::CodexDesktop || tool == Tool::CodexCli || tool == Tool::ChatGptWeb;
+        const bool antigravity = tool == Tool::AntigravityDesktop || tool == Tool::AntigravityCli;
+        auto source = antigravity          ? antigravityLogo
+                      : tool == Tool::Gemini ? geminiLogo
+                      : codex              ? chatgptLogo
+                      : tool == Tool::ClaudeCli && claudeCliLogo ? claudeCliLogo
+                                                                   : claudeLogo;
+        if (source && codex) {
+            // ChatGPT's white knot on its black tile.
+            Border tile;
+            tile.CornerRadius({8, 8, 8, 8});
+            tile.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0, 0, 0}));
+            tile.Child(logo(source, 20));  // even margins keep it on whole pixels
+            frame.Children().Append(tile);
+        } else if (source) {
+            frame.Children().Append(logo(source, size));
+        } else {
+            auto look = LookOf(tool);
+            Border tile;
+            tile.CornerRadius({8, 8, 8, 8});
+            tile.Background(SolidColorBrush(look.color));
+            FontIcon glyph;
+            glyph.Glyph(look.glyph);
+            glyph.FontSize(14);
+            glyph.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            tile.Child(glyph);
+            frame.Children().Append(tile);
+        }
+        if (web) {
+            Border chip;
+            chip.Width(15);
+            chip.Height(15);
+            chip.CornerRadius({8, 8, 8, 8});
+            chip.HorizontalAlignment(HorizontalAlignment::Right);
+            chip.VerticalAlignment(VerticalAlignment::Bottom);
+            chip.Margin({0, 0, -4, -4});
+            chip.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0x1E, 0x1E, 0x1E}));
+            chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.BorderThickness({1, 1, 1, 1});
+            FontIcon globe;
+            globe.Glyph(L"\uE774");  // globe: opens in your browser
+            globe.FontSize(8);
+            globe.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.Child(globe);
+            frame.Children().Append(chip);
+        }
+        if (chat) {
+            Border chip;
+            chip.Width(15);
+            chip.Height(15);
+            chip.CornerRadius({8, 8, 8, 8});
+            chip.HorizontalAlignment(HorizontalAlignment::Right);
+            chip.VerticalAlignment(VerticalAlignment::Bottom);
+            chip.Margin({0, 0, -4, -4});
+            chip.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0x1E, 0x1E, 0x1E}));
+            chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.BorderThickness({1, 1, 1, 1});
+            FontIcon bubble;
+            bubble.Glyph(L"\uE8BD");  // speech bubble: a Claude chat, opens in the Claude app
+            bubble.FontSize(8);
+            bubble.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.Child(bubble);
+            frame.Children().Append(chip);
+        }
+        if (cli) {
+            Border chip;
+            chip.Width(18);
+            chip.Height(13);
+            chip.CornerRadius({3, 3, 3, 3});
+            chip.HorizontalAlignment(HorizontalAlignment::Right);
+            chip.VerticalAlignment(VerticalAlignment::Bottom);
+            chip.Margin({0, 0, -5, -4});
+            chip.Background(SolidColorBrush(winrt::Windows::UI::Color{255, 0x1E, 0x1E, 0x1E}));
+            chip.BorderBrush(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            chip.BorderThickness({1, 1, 1, 1});
+            TextBlock prompt;
+            prompt.Text(L">_");
+            prompt.FontFamily(FontFamily(L"Cascadia Mono, Consolas"));
+            prompt.FontSize(8);
+            prompt.FontWeight(Microsoft::UI::Text::FontWeights::Bold());
+            prompt.Foreground(SolidColorBrush(winrt::Windows::UI::Color{255, 255, 255, 255}));
+            prompt.HorizontalAlignment(HorizontalAlignment::Center);
+            prompt.VerticalAlignment(VerticalAlignment::Center);
+            chip.Child(prompt);
+            frame.Children().Append(chip);
+        }
+        return frame;
+    }
+
     TextBlock SnippetBlock(std::wstring const& snippet) {
         TextBlock block;
         block.FontSize(12);
@@ -732,6 +1293,15 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             run.clear();
         };
         for (wchar_t c : snippet) {
+            if (c == L'\x03') {
+                // Found by meaning rather than by the words typed.
+                Documents::Run label;
+                label.Text(L"\u2248 similar meaning  ");
+                label.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+                label.Foreground(ThemeBrush(L"AccentTextFillColorPrimaryBrush"));
+                block.Inlines().Append(label);
+                continue;
+            }
             if (c == L'\x01' || c == L'\x02') {
                 flush();
                 highlight = c == L'\x01';
@@ -751,8 +1321,39 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void Open(int64_t id) {
-        if (auto row = Row(id); row && !sessions::OpenSession(*row))
-            ShowProblem(L"Could not open that session in " + std::wstring(sessions::ToolName(row->tool)));
+        auto row = Row(id);
+        if (!row) return;
+        if (row->tool == Tool::ClaudeDesktop || row->tool == Tool::ClaudeWeb) {
+            // Claude can only open sessions of the organization it is showing;
+            // otherwise its link quietly starts a new session.
+            std::string active;
+            try { active = index->MetaValue("claude_desktop_account"); } catch (...) {}
+            if (!active.empty() && active != row->account) {
+                ShowMain();
+                ConfirmOtherOrganization(id, AccountName(row->account), AccountName(active));
+                return;
+            }
+        }
+        if (!sessions::OpenSession(*row)) ShowProblem(L"Could not open that session in " + std::wstring(sessions::ToolName(row->tool)));
+    }
+
+    fire_and_forget ConfirmOtherOrganization(int64_t id, std::wstring target, std::wstring active) {
+        auto lifetime = get_strong();
+        ContentDialog dialog;
+        dialog.XamlRoot(shell.XamlRoot());
+        dialog.Title(box_value(L"Switch Claude to " + target));
+        TextBlock text;
+        text.TextWrapping(TextWrapping::Wrap);
+        text.Text(L"This session belongs to " + target + L". Claude seems to be showing " + active +
+                  L", and it can only open sessions of the organization it is showing. Switch organizations in Claude "
+                  L"(your name in the lower left), then open the session.");
+        dialog.Content(text);
+        dialog.PrimaryButtonText(L"Open Claude");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Primary);
+        auto result = co_await dialog.ShowAsync();
+        if (result != ContentDialogResult::Primary || closing) co_return;
+        if (auto row = Row(id)) sessions::OpenSession(*row);
     }
 
     int64_t MenuTarget() {
@@ -790,8 +1391,16 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             cardMenu.Items().Append(MenuFlyoutSeparator());
             auto externalId = row->externalId;
             add(L"Copy session id", L"", [externalId] { CopyText(externalId); });
-            auto path = row->path;
-            add(L"Show transcript file", L"", [path] { sessions::RevealFile(path); });
+            if (sessions::IsWeb(row->tool)) {
+                auto copy = *row;
+                if (row->tool == Tool::ClaudeWeb)
+                    add(L"Open in browser", L"\uE774", [copy] { sessions::OpenInBrowser(copy); });
+                auto address = sessions::WebAddress(*row);
+                add(L"Copy link", L"\uE71B", [address] { CopyText(address); });
+            } else {
+                auto path = row->path;
+                add(L"Show transcript file", L"\uE838", [path] { sessions::RevealFile(path); });
+            }
         });
     }
 
@@ -825,17 +1434,291 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
     }
 
+    // ---- Tray and quick search ------------------------------------------
+
+    // Everything is drawn 12% larger than Windows' own scale: the content is laid out in a
+    // proportionally smaller space and magnified to fill the window (text stays sharp).
+    static constexpr double UiScale = 1.12;
+    static UIElement Scaled(FrameworkElement const& content) {
+        Grid host;
+        content.HorizontalAlignment(HorizontalAlignment::Left);
+        content.VerticalAlignment(VerticalAlignment::Top);
+        ScaleTransform scale;
+        scale.ScaleX(UiScale);
+        scale.ScaleY(UiScale);
+        content.RenderTransform(scale);
+        host.Children().Append(content);
+        host.SizeChanged([content](auto&&, SizeChangedEventArgs const& e) {
+            content.Width(e.NewSize().Width / UiScale);
+            content.Height(e.NewSize().Height / UiScale);
+        });
+        return host;
+    }
+
+    void ShowMain() {
+        if (closing) return;
+        HideQuick();
+        auto appWindow = window.AppWindow();
+        appWindow.Show();
+        if (auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>();
+            presenter && presenter.State() == OverlappedPresenterState::Minimized)
+            presenter.Restore();
+        window.Activate();
+        HWND handle{};
+        window.as<IWindowNative>()->get_WindowHandle(&handle);
+        if (handle) SetForegroundWindow(handle);
+    }
+
+    static constexpr wchar_t QuickMarkup[] = LR"(
+<Grid xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' x:Name='Backdrop' Background='#01000000'>
+  <Grid.RowDefinitions><RowDefinition Height='0.16*'/><RowDefinition Height='Auto'/><RowDefinition Height='*'/></Grid.RowDefinitions>
+  <Border Grid.Row='1' x:Name='Panel' Width='780' HorizontalAlignment='Center' CornerRadius='12' Padding='14'
+          Background='{ThemeResource SolidBackgroundFillColorBaseBrush}' BorderBrush='{ThemeResource SurfaceStrokeColorDefaultBrush}' BorderThickness='1'>
+    <StackPanel Spacing='10'>
+      <TextBox x:Name='QuickBox' FontSize='22' PlaceholderText='Find a conversation' AutomationProperties.Name='Find a conversation' IsSpellCheckEnabled='False'/>
+      <ListView x:Name='QuickList' SelectionMode='Single' IsItemClickEnabled='True' MaxHeight='620'>
+        <ListView.ItemContainerStyle>
+          <Style TargetType='ListViewItem'>
+            <Setter Property='HorizontalContentAlignment' Value='Stretch'/>
+            <Setter Property='Padding' Value='10,6,10,6'/>
+            <Setter Property='MinHeight' Value='0'/>
+          </Style>
+        </ListView.ItemContainerStyle>
+      </ListView>
+      <TextBlock x:Name='QuickHint' FontSize='12' Foreground='{ThemeResource TextFillColorSecondaryBrush}'
+                 Text='&#x2191; &#x2193; to choose  &#xB7;  Enter to open  &#xB7;  Esc to close'/>
+    </StackPanel>
+  </Border>
+</Grid>)";
+
+    void CreateQuick() {
+        quick = Window();
+        quick.Title(L"Sessions search");
+        quick.SystemBackdrop(DesktopAcrylicBackdrop());
+        quickRoot = Xaml(QuickMarkup);
+        quick.Content(Scaled(quickRoot));
+        quickBox = Named<TextBox>(quickRoot, L"QuickBox");
+        quickList = Named<ListView>(quickRoot, L"QuickList");
+        quickHint = Named<TextBlock>(quickRoot, L"QuickHint");
+        quickItems = single_threaded_observable_vector<IInspectable>();
+        quickList.ItemsSource(quickItems);
+
+        // Clicking anywhere outside the panel closes it.
+        quickRoot.PointerPressed([this](auto&&, Input::PointerRoutedEventArgs const& e) {
+            if (e.OriginalSource() == quickRoot) HideQuick();
+        });
+        quickList.ItemClick([this](auto&&, ItemClickEventArgs const& e) {
+            if (auto row = e.ClickedItem().try_as<FrameworkElement>()) OpenFromQuick(unbox_value<int64_t>(row.Tag()));
+        });
+        quickBox.PreviewKeyDown([this](auto&&, Input::KeyRoutedEventArgs const& e) {
+            using winrt::Windows::System::VirtualKey;
+            const int count = int(quickItems.Size());
+            int selected = quickList.SelectedIndex();
+            switch (e.Key()) {
+            case VirtualKey::Down:
+                if (count) quickList.SelectedIndex(std::min(count - 1, selected + 1));
+                break;
+            case VirtualKey::Up:
+                if (count) quickList.SelectedIndex(std::max(0, selected - 1));
+                break;
+            case VirtualKey::PageDown:
+                if (count) quickList.SelectedIndex(std::min(count - 1, selected + 8));
+                break;
+            case VirtualKey::PageUp:
+                if (count) quickList.SelectedIndex(std::max(0, selected - 8));
+                break;
+            case VirtualKey::Enter:
+                if (count) {
+                    auto item = quickItems.GetAt(uint32_t(std::max(0, selected))).as<FrameworkElement>();
+                    OpenFromQuick(unbox_value<int64_t>(item.Tag()));
+                }
+                break;
+            case VirtualKey::Escape:
+                HideQuick();
+                break;
+            default:
+                return;
+            }
+            if (quickList.SelectedItem()) quickList.ScrollIntoView(quickList.SelectedItem());
+            e.Handled(true);
+        });
+        quickDelay = quick.DispatcherQueue().CreateTimer();
+        quickDelay.Interval(std::chrono::milliseconds(120));
+        quickDelay.IsRepeating(false);
+        quickDelay.Tick([this](auto&&, auto&&) { QuickSearch(); });
+        quickBox.TextChanged([this](auto&&, auto&&) {
+            quickDelay.Stop();
+            quickDelay.Start();
+        });
+        // Leaving the overlay (clicking another window) closes it.
+        quick.Activated([this](auto&&, WindowActivatedEventArgs const& e) {
+            // (Ignored right after opening, while Windows settles which window is in front.)
+            if (e.WindowActivationState() != WindowActivationState::Deactivated && quickBox) quickBox.Focus(FocusState::Programmatic);
+            if (e.WindowActivationState() == WindowActivationState::Deactivated && !quickOpening &&
+                sessions::NowMs() - quickShownAt > 800)
+                HideQuick();
+        });
+        quick.Closed([this](auto&&, WindowEventArgs const& e) {
+            // Closing (Alt+F4) only hides it; Sessions keeps running in the tray.
+            if (!closing) {
+                e.Handled(true);
+                HideQuick();
+            }
+        });
+
+        auto queue = quick.DispatcherQueue();
+        auto weak = get_weak();
+        quickSearcher = std::make_unique<Searcher>(databaseFile, [queue, weak](uint64_t ticket, std::wstring, std::vector<Found> results) {
+            queue.TryEnqueue([weak, ticket, results = std::move(results)]() mutable {
+                if (auto app = weak.get(); app && !app->closing) app->QuickResults(ticket, std::move(results));
+            });
+        });
+    }
+
+    void ShowQuick() {
+        if (closing) return;
+        if (!quick) CreateQuick();
+        // A borderless, always-on-top window covering the whole monitor the
+        // pointer is on (taskbar included).
+        auto appWindow = quick.AppWindow();
+        auto presenter = OverlappedPresenter::Create();
+        presenter.SetBorderAndTitleBar(false, false);
+        presenter.IsResizable(false);
+        presenter.IsMaximizable(false);
+        presenter.IsMinimizable(false);
+        presenter.IsAlwaysOnTop(true);
+        appWindow.SetPresenter(presenter);
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        auto display = DisplayArea::GetFromPoint({cursor.x, cursor.y}, DisplayAreaFallback::Primary);
+        appWindow.MoveAndResize(display.OuterBounds());
+        appWindow.IsShownInSwitchers(false);
+        quickShownAt = sessions::NowMs();
+        appWindow.Show();
+        quick.Activate();
+        HWND handle{};
+        quick.as<IWindowNative>()->get_WindowHandle(&handle);
+        if (handle) SetForegroundWindow(handle);
+        quickBox.Text(L"");
+        QuickSearch();
+        quickBox.Focus(FocusState::Programmatic);
+        // Focus again once the window has finished coming forward.
+        quick.DispatcherQueue().TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Low, [this] {
+            if (quickBox) quickBox.Focus(FocusState::Keyboard);
+        });
+    }
+
+    void HideQuick() {
+        if (!quick) return;
+        if (quickDelay) quickDelay.Stop();
+        quick.AppWindow().Hide();
+    }
+
+    void OpenFromQuick(int64_t id) {
+        quickOpening = true;
+        HideQuick();
+        quickOpening = false;
+        Open(id);
+    }
+
+    void QuickSearch() {
+        std::wstring query = quickBox.Text().c_str();
+        while (!query.empty() && iswspace(query.back())) query.pop_back();
+        while (!query.empty() && iswspace(query.front())) query.erase(query.begin());
+        if (query.empty()) {
+            // Most recent conversations first.
+            ++quickTicket;
+            std::vector<Found> recent;
+            for (size_t i = 0; i < sessionRows.size() && i < 12; ++i) recent.push_back({sessionRows[i].id, 0, {}});
+            ShowQuickRows(recent);
+            return;
+        }
+        quickTicket = quickSearcher->Ask(query);
+    }
+
+    void QuickResults(uint64_t ticket, std::vector<Found> results) {
+        if (ticket != quickTicket) return;
+        if (results.size() > 40) results.resize(40);
+        ShowQuickRows(results);
+    }
+
+    void ShowQuickRows(std::vector<Found> const& results) {
+        std::vector<IInspectable> rows;
+        for (auto const& result : results)
+            if (auto row = Row(result.session)) rows.push_back(QuickRow(*row, result.byMeaning ? L"\x03" + result.snippet : result.snippet));
+        quickItems.ReplaceAll(rows);
+        if (!rows.empty()) {
+            quickList.SelectedIndex(0);
+            quickList.ScrollIntoView(quickItems.GetAt(0));
+        }
+        quickHint.Text(rows.empty() ? L"No conversation matches. Try other words."
+                                    : L"\u2191 \u2193 to choose  \u00B7  Enter to open  \u00B7  Esc to close");
+    }
+
+    // One line per conversation: logo, title, folder and date, and the matching passage.
+    FrameworkElement QuickRow(sessions::SessionRow const& row, std::wstring const& snippet) {
+        Grid grid;
+        grid.Tag(box_value(row.id));
+        grid.ColumnSpacing(12);
+        ColumnDefinition badgeColumn, textColumn, dateColumn;
+        badgeColumn.Width(GridLengthHelper::FromPixels(32));
+        textColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        dateColumn.Width(GridLengthHelper::Auto());
+        grid.ColumnDefinitions().Append(badgeColumn);
+        grid.ColumnDefinitions().Append(textColumn);
+        grid.ColumnDefinitions().Append(dateColumn);
+        auto badge = Badge(row.tool);
+        badge.VerticalAlignment(VerticalAlignment::Center);
+        grid.Children().Append(badge);
+
+        StackPanel text;
+        text.Spacing(1);
+        Grid::SetColumn(text, 1);
+        TextBlock title;
+        title.Text(row.title);
+        title.FontSize(15);
+        title.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+        title.TextTrimming(TextTrimming::CharacterEllipsis);
+        title.MaxLines(1);
+        text.Children().Append(title);
+        if (!snippet.empty()) {
+            auto passage = SnippetBlock(snippet);
+            passage.MaxLines(1);
+            text.Children().Append(passage);
+        } else if (!row.folder.empty()) {
+            TextBlock folder;
+            folder.Text(row.folder);
+            folder.FontSize(12);
+            folder.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
+            text.Children().Append(folder);
+        }
+        grid.Children().Append(text);
+
+        TextBlock when;
+        when.Text((row.folder.empty() || snippet.empty() ? L"" : row.folder + L"  \u00B7  ") + FriendlyDate(row.lastActivity));
+        when.FontSize(12);
+        when.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
+        when.VerticalAlignment(VerticalAlignment::Center);
+        Grid::SetColumn(when, 2);
+        grid.Children().Append(when);
+        Automation::AutomationProperties::SetName(grid, hstring(row.title));
+        return grid;
+    }
+
     // ---- Status and settings ---------------------------------------------
 
+    sessions::IndexStatus lastIndexStatus;
+
     void ShowStatus(sessions::IndexStatus const& status) {
+        lastIndexStatus = status;
         using State = sessions::IndexStatus::State;
         const bool working = status.state == State::Scanning || status.state == State::Indexing;
         busy.IsActive(working);
         busy.Visibility(working ? Visibility::Visible : Visibility::Collapsed);
         doneIcon.Visibility(status.state == State::Ready ? Visibility::Visible : Visibility::Collapsed);
         problemIcon.Visibility(status.state == State::Failed ? Visibility::Visible : Visibility::Collapsed);
-        statusText.Text(status.message);
-        ToolTipService::SetToolTip(statusText, box_value(status.message));
+        indexMessage = status.message;
+        ShowCombinedStatus();
         if (status.dataChanged) {
             Reload();
             if (!activeQuery.empty() && status.state == State::Ready) {
@@ -843,6 +1726,143 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 StartSearch();
             }
         }
+    }
+
+    // One row per site: logo, who is signed in (or what to do), live progress,
+    // and the one button that makes sense next.
+    std::wstring webNotice;  // a one-off message, for example after signing out
+    void ShowWebInfo() {
+        if (!webSites || !webSync) return;
+        webSites.Children().Clear();
+        std::vector<std::pair<sessions::WebSync*, sessions::WebSync::SiteStatus>> rows;
+        for (auto const& site : webSync->Statuses()) {
+            rows.emplace_back(webSync.get(), site);
+            if (site.tool == Tool::ChatGptWeb && webSync2)
+                for (auto const& second : webSync2->Statuses()) rows.emplace_back(webSync2.get(), second);
+        }
+        for (auto const& [sync, site] : rows) {
+            std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : site.tool == Tool::ChatGptWeb ? L"ChatGPT" : L"Gemini";
+            if (sync->Slot() > 1) name += L" \u00B7 second account";
+            std::wstring now = sync->Live(site.tool);
+            // Signed in if the check running now says so, otherwise per the last finished check.
+            const bool signedIn = sync->SignedInNow(site.tool) || (now.empty() || now.rfind(L"Waiting", 0) == 0 || now.rfind(L"Next", 0) == 0
+                                                                          ? site.signedIn
+                                                                          : false) ||
+                                  (!now.empty() && site.signedIn);
+            const bool unreachable = site.problem.find(L"could not reach") != std::wstring::npos ||
+                                     site.problem.find(L"stopped answering") != std::wstring::npos;
+            std::wstring text;
+            bool needsYou = false;
+            if (!now.empty()) {
+                text = now + L".";
+                if (signedIn && now.rfind(L"Signed in", 0) != 0) text = L"Signed in. " + text;
+            } else if (!site.checked) {
+                text = sync->Slot() > 1 ? L"Optional: sign in here with another ChatGPT account, such as a work one."
+                                        : L"Not signed in yet. Press Sign in.";
+                needsYou = sync->Slot() == 1;
+            } else if (site.signedIn) {
+                text = L"Signed in as " + (site.who.empty() ? std::wstring(L"your account") : site.who) + L". Nothing to do.";
+            } else if (unreachable) {
+                text = L"The site didn't answer at the last check. Nothing to do; Sessions tries again by itself.";
+            } else {
+                text = L"Not signed in. Press Sign in.";
+                needsYou = true;
+            }
+            if (now.empty() && site.chats) text += L" " + Number(site.chats) + (site.chats == 1 ? L" chat in Sessions." : L" chats in Sessions.");
+            if (now.empty() && site.checkedAt > 0) text += L" Last checked " + FriendlyDate(site.checkedAt) + L".";
+
+            Border card;
+            card.CornerRadius({8, 8, 8, 8});
+            card.Padding({12, 10, 12, 10});
+            card.Background(ThemeBrush(L"CardBackgroundFillColorDefaultBrush"));
+            Grid row;
+            row.ColumnSpacing(10);
+            ColumnDefinition logoColumn, textColumn, buttonColumn;
+            logoColumn.Width(GridLengthHelper::FromPixels(32));
+            textColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            buttonColumn.Width(GridLengthHelper::Auto());
+            row.ColumnDefinitions().Append(logoColumn);
+            row.ColumnDefinitions().Append(textColumn);
+            row.ColumnDefinitions().Append(buttonColumn);
+            auto logo = Badge(site.tool);
+            row.Children().Append(logo);
+            StackPanel words;
+            Grid::SetColumn(words, 1);
+            TextBlock title;
+            title.Text(name);
+            title.FontWeight(Microsoft::UI::Text::FontWeights::SemiBold());
+            words.Children().Append(title);
+            TextBlock state;
+            state.Text(text);
+            state.FontSize(12);
+            state.TextWrapping(TextWrapping::Wrap);
+            state.Foreground(ThemeBrush(needsYou ? L"SystemFillColorCautionBrush" : L"TextFillColorSecondaryBrush"));
+            // The saved problem belongs to the last check; don't show it beside a row that says signed in.
+            if (!site.problem.empty() && !signedIn) ToolTipService::SetToolTip(state, box_value(site.problem));
+            words.Children().Append(state);
+            row.Children().Append(words);
+
+            StackPanel actions;
+            actions.Spacing(2);
+            actions.VerticalAlignment(VerticalAlignment::Center);
+            Grid::SetColumn(actions, 2);
+            Button signIn;
+            // The button matches the state: "Sign in" (highlighted) only when something
+            // is needed; otherwise "Switch account" for using a different account.
+            signIn.Content(box_value(signedIn ? L"Switch account" : L"Sign in"));
+            if (needsYou) signIn.Style(Application::Current().Resources().Lookup(box_value(L"AccentButtonStyle")).as<Style>());
+            auto tool = site.tool;
+            signIn.Click([this, sync, tool, signedIn](auto&&, auto&&) {
+                if (signedIn) {
+                    // Switching account: sign out first so the site shows its account chooser.
+                    sync->SignOut(tool, [this, sync, tool](std::wstring) {
+                        if (!closing) sync->SignIn(tool);
+                    });
+                } else {
+                    sync->SignIn(tool);
+                }
+            });
+            actions.Children().Append(signIn);
+            if (signedIn) {
+                HyperlinkButton out;
+                out.Content(box_value(L"Sign out"));
+                out.Padding({4, 0, 4, 0});
+                out.FontSize(12);
+                out.Click([this, sync, tool](auto&&, auto&&) {
+                    sync->SignOut(tool, [this](std::wstring message) {
+                        if (closing) return;
+                        webNotice = message;
+                        ShowWebInfo();
+                    });
+                });
+                actions.Children().Append(out);
+            }
+            row.Children().Append(actions);
+            card.Child(row);
+            webSites.Children().Append(card);
+        }
+        if (!webNotice.empty()) {
+            TextBlock notice;
+            notice.Text(webNotice);
+            notice.FontSize(12);
+            notice.TextWrapping(TextWrapping::Wrap);
+            notice.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
+            webSites.Children().Append(notice);
+            webNotice.clear();
+        }
+    }
+
+    void ShowCombinedStatus() {
+        std::wstring web = webMessage.empty() ? webMessage2 : webMessage;
+        std::wstring text = web.empty() ? indexMessage : L"Syncing web chats \u00B7 " + web;
+        statusText.Text(text);
+        tray.SetTip((L"Sessions \u00B7 " + text).c_str());
+        ToolTipService::SetToolTip(statusText, box_value(text));
+        using State = sessions::IndexStatus::State;
+        const bool working = !web.empty() || lastIndexStatus.state == State::Scanning || lastIndexStatus.state == State::Indexing;
+        busy.IsActive(working);
+        busy.Visibility(working ? Visibility::Visible : Visibility::Collapsed);
+        doneIcon.Visibility(!working && lastIndexStatus.state == State::Ready ? Visibility::Visible : Visibility::Collapsed);
     }
 
     void ShowProblem(std::wstring const& message) {
@@ -861,6 +1881,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
     }
 
     void BuildSettings() {
+        ShowWebInfo();
         accountsPanel.Children().Clear();
         for (auto const& account : accountRows) {
             Border card;
@@ -870,7 +1891,10 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             StackPanel stack;
             stack.Spacing(6);
             TextBlock heading;
-            heading.Text((account.family == sessions::Family::Codex ? L"ChatGPT / Codex  ·  " : L"Claude  ·  ") +
+            heading.Text((account.id.rfind("gemini:", 0) == 0          ? L"Gemini  ·  "
+                          : account.id.rfind("antigravity:", 0) == 0 ? L"Antigravity  ·  "
+                          : account.family == sessions::Family::Codex ? L"ChatGPT / Codex  ·  "
+                                                                       : L"Claude  ·  ") +
                          Number(account.sessions) + (account.sessions == 1 ? L" session" : L" sessions"));
             heading.FontSize(12);
             heading.Foreground(ThemeBrush(L"TextFillColorSecondaryBrush"));
@@ -912,7 +1936,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             auto size = std::filesystem::file_size(databaseFile, error);
             indexInfo.Text(databaseFile.wstring() + L"\n" + Number(totals.sessions) + L" sessions, " + Number(totals.messages) +
                            L" messages, " + Number(int64_t(size / (1024 * 1024))) + L" MB. " + Number(totals.skipped) +
-                           L" helper or empty transcripts are skipped.");
+                           L" helper or empty transcripts are left out.");
         } catch (...) {
         }
     }
@@ -939,12 +1963,13 @@ namespace {
 int RunHeadless(int argc, wchar_t** argv) {
     std::filesystem::path database = sessions::Index::DefaultFile();
     std::vector<std::wstring> queries;
-    bool scan = false;
+    bool scan = false, keys = false;  // --keys: every result's session key, in order (for scoring tests)
     for (int i = 1; i < argc; ++i) {
         std::wstring_view arg(argv[i]);
         if (arg == L"--index") scan = true;
         else if (arg == L"--db" && i + 1 < argc) database = argv[++i];
         else if (arg == L"--search" && i + 1 < argc) queries.push_back(argv[++i]);
+        else if (arg == L"--keys") keys = true;
     }
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!out || out == INVALID_HANDLE_VALUE) {
@@ -983,14 +2008,25 @@ int RunHeadless(int argc, wchar_t** argv) {
         auto totals = index.Count();
         print(L"sessions " + std::to_wstring(totals.sessions) + L", skipped " + std::to_wstring(totals.skipped) + L", messages " +
               std::to_wstring(totals.messages));
+        std::wstring problem;
+        auto embedder = sessions::Embedder::Shared(&problem);
+        print(embedder ? L"meaning search on " + embedder->Device() : problem);
+        sessions::HybridSearch hybrid(database);
         for (auto const& query : queries) {
             auto started = sessions::NowMs();
-            auto hits = index.Search(query);
-            print(L"search “" + query + L"”: " + std::to_wstring(hits.size()) + L" sessions in " +
+            auto hits = hybrid.Run(query, 8);
+            print(L"search \u201C" + query + L"\u201D: " + std::to_wstring(hits.size()) + L" sessions in " +
                   std::to_wstring(sessions::NowMs() - started) + L" ms");
-            for (size_t i = 0; i < hits.size() && i < 5; ++i) {
+            if (keys) {
+                std::wstring line = L"keys";
+                for (auto const& hit : hits)
+                    if (auto row = byId[hit.session]) line += L"	" + sessions::Wide(row->key);
+                print(line);
+            }
+            for (size_t i = 0; i < hits.size() && i < 8; ++i) {
                 auto row = byId[hits[i].session];
-                auto snippet = index.Snippet(query, hits[i].bestMessage);
+                auto snippet = (hits[i].byMeaning ? L"[meaning " + std::to_wstring(int(hits[i].similarity * 100)) + L"] " : std::wstring()) +
+                               hits[i].snippet;
                 std::replace(snippet.begin(), snippet.end(), L'\x01', L'[');
                 std::replace(snippet.begin(), snippet.end(), L'\x02', L']');
                 std::replace(snippet.begin(), snippet.end(), L'\n', L' ');
@@ -1006,11 +2042,75 @@ int RunHeadless(int argc, wchar_t** argv) {
 
 }  // namespace
 
+namespace {
+
+int RunWebSyncHeadless(int argc, wchar_t** argv) {
+    std::filesystem::path database = sessions::Index::DefaultFile(), profile;
+    for (int i = 1; i < argc; ++i) {
+        std::wstring_view arg(argv[i]);
+        if (arg == L"--db" && i + 1 < argc) database = argv[++i];
+        else if (arg == L"--profile" && i + 1 < argc) profile = argv[++i];
+    }
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE) {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+        out = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    auto print = [out](std::wstring const& text) {
+        auto bytes = sessions::Utf8(text + L"\n");
+        DWORD written{};
+        WriteFile(out, bytes.data(), DWORD(bytes.size()), &written, nullptr);
+    };
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool finished = false;
+    sessions::Index index(database);
+    std::unique_ptr<sessions::WebSync> sync;
+    sync = std::make_unique<sessions::WebSync>(index, [&](std::wstring const& status, bool, bool done) {
+        if (!status.empty()) print(L"  " + status);
+        if (done) {
+            print(WebSummary(*sync, true));
+            finished = true;
+            PostQuitMessage(0);
+        }
+    }, profile);
+    sync->SyncAll();
+    MSG msg{};
+    while (!finished && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    sync.reset();
+    return 0;
+}
+
+}  // namespace
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int argc{};
     auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; argv && i < argc; ++i) {
         std::wstring_view arg(argv[i]);
+        if (arg == L"--websync") {
+            int code = RunWebSyncHeadless(argc, argv);
+            LocalFree(argv);
+            return code;
+        }
+        if (arg == L"--import-chatgpt" && i + 1 < argc) {
+            std::filesystem::path database = sessions::Index::DefaultFile();
+            for (int j = 1; j + 1 < argc; ++j)
+                if (std::wstring_view(argv[j]) == L"--db") database = argv[j + 1];
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            auto print = [](std::wstring const& text) {
+                auto utf8 = sessions::Utf8(text + L"\n");
+                DWORD written;
+                WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), utf8.data(), DWORD(utf8.size()), &written, nullptr);
+            };
+            auto result = sessions::ImportChatGptExport(database, argv[i + 1], print);
+            print(L"imported " + std::to_wstring(result.conversations) + L", skipped " + std::to_wstring(result.skipped) +
+                  (result.problem.empty() ? L"" : L" \u00B7 " + result.problem));
+            LocalFree(argv);
+            return result.conversations || result.problem.empty() ? 0 : 1;
+        }
         if (arg == L"--index" || arg == L"--search") {
             int code = RunHeadless(argc, argv);
             LocalFree(argv);
@@ -1018,9 +2118,33 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
     if (argv) LocalFree(argv);
+
+    // One copy at a time: two copies would share (and could damage) the web
+    // sign-in browser profile and the database. A second launch shows the
+    // running copy instead.
+    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\ShaunobiSessionsApp");
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND tray = FindWindowW(L"SessionsTrayWindow", nullptr);
+        if (tray) {
+            DWORD process{};
+            GetWindowThreadProcessId(tray, &process);
+            AllowSetForegroundWindow(process);
+            PostMessageW(tray, WM_APP + 41, 1, WM_CONTEXTMENU);  // same as right-clicking the tray icon: open the window
+        }
+        CloseHandle(single);
+        return 0;
+    }
     try {
         init_apartment(apartment_type::single_threaded);
-        Application::Start([](auto&&) { make<App>(); });
+        Application::Start([](auto&&) {
+            auto app = make_self<App>();
+            int count{};
+            auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+            for (int i = 1; args && i < count; ++i)
+                if (std::wstring_view(args[i]) == L"--tray") app->startInTray = true;
+                else if (std::wstring_view(args[i]) == L"--quick") app->startInTray = app->startQuick = true;
+            if (args) LocalFree(args);
+        });
     } catch (hresult_error const& e) {
         MessageBoxW(nullptr, e.message().c_str(), L"Sessions could not start", MB_OK | MB_ICONERROR);
         return 1;

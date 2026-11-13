@@ -2,3 +2,11 @@
 
 LANGUAGE 0, 0
 IDI_SESSIONS ICON "assets\\Sessions.ico"
+
+IDR_BRAND RCDATA "assets\\Sessions.png"
+// Tool logos copied from the installed apps by tools\ExtractLogos.ps1 (not committed).
+IDR_LOGO_CLAUDE RCDATA "assets\\logos\\claude.png"
+IDR_LOGO_CLAUDE_CLI RCDATA "assets\\logos\\claude-cli.png"
+IDR_LOGO_CHATGPT RCDATA "assets\\logos\\chatgpt-white.png"
+IDR_LOGO_ANTIGRAVITY RCDATA "assets\\logos\\antigravity.png"
+IDR_LOGO_GEMINI RCDATA "assets\\logos\\gemini.png"

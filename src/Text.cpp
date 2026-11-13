@@ -155,7 +155,69 @@ bool IsInjectedContext(std::string_view text) {
         "# AGENTS.md instructions", "<INSTRUCTIONS>", "<artifact-content", "<user-prompt-submit-hook>", "<bash-"};
     for (auto prefix : prefixes)
         if (text.substr(0, prefix.size()) == prefix) return true;
+    static constexpr std::array<std::string_view, 6> codex{
+        "Continue working toward the active thread goal", "Here is a list of plugins that are available but not installed",
+        "<in-app-browser-context", "<heartbeat>", "<automation", "<goal_context"};
+    for (auto prefix : codex)
+        if (text.substr(0, prefix.size()) == prefix) return true;
+    // Answers to an app's question forms arrive as JSON, not as typed words.
+    if (text.substr(0, 3) == "[{\"" || text.substr(0, 2) == "{\"") return true;
     return text.empty();
+}
+
+std::string OwnWords(std::string_view text) {
+    if (IsInjectedContext(text)) return {};
+    std::string out(text);
+    std::string_view view(out);
+    while (!view.empty() && (view.front() == ' ' || view.front() == '\n' || view.front() == '\r')) view.remove_prefix(1);
+    if (!view.empty() && view.front() == '<') out = DecodeEntities(StripTags(view));
+    // Codex wraps attachments: "# Files mentioned by the user: ... ## My request: <words>".
+    constexpr std::string_view request = "## My request:";
+    if (auto at = out.find(request); at != std::string::npos && out.find("# Files mentioned by the user") != std::string::npos)
+        out = out.substr(at + request.size());
+    else if (out.find("# Files mentioned by the user") != std::string::npos)
+        return {};
+    if (IsInjectedContext(out)) return {};
+    return out;
+}
+
+std::string CleanChatGptText(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    // U+E200..U+E2FF are EE 88 80 .. EE 8B BF in UTF-8; E200 opens a marker, E201 closes it.
+    auto privateUse = [&](size_t i) -> int {
+        if (i + 2 < text.size() && uint8_t(text[i]) == 0xEE && uint8_t(text[i + 1]) >= 0x88 && uint8_t(text[i + 1]) <= 0x8B)
+            return (uint8_t(text[i + 1]) - 0x88) * 64 + (uint8_t(text[i + 2]) & 0x3F);
+        return -1;
+    };
+    for (size_t i = 0; i < text.size();) {
+        int code = privateUse(i);
+        if (code == 0) {  // U+E200: skip to the matching U+E201
+            size_t j = i + 3;
+            while (j < text.size() && privateUse(j) != 1) ++j;
+            i = j < text.size() ? j + 3 : text.size();
+            continue;
+        }
+        if (code >= 0) {  // any other marker character
+            i += 3;
+            continue;
+        }
+        // 【4:2†source】 style references.
+        if (text.substr(i, 3) == "\xE3\x80\x90") {
+            auto close = text.find("\xE3\x80\x91", i);
+            auto dagger = text.find("\xE2\x80\xA0", i);
+            if (close != std::string_view::npos && dagger != std::string_view::npos && dagger < close && close - i < 200) {
+                i = close + 3;
+                continue;
+            }
+        }
+        out.push_back(text[i++]);
+    }
+    auto start = out.find_first_not_of(" \n\r\t");
+    if (start == std::string::npos) return {};
+    // A tool call or record shown as a message: {"path": ...}, {"query": ...} and the like.
+    if (out[start] == '{' || (out[start] == '[' && start + 1 < out.size() && out[start + 1] == '{')) return {};
+    return out;
 }
 
 std::filesystem::path HomeFolder() {

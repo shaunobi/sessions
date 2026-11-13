@@ -8,8 +8,17 @@
 // Reading the four session stores. Nothing here writes to another tool's files.
 namespace sessions {
 
-enum class Tool : int { ClaudeDesktop = 1, ClaudeCli = 2, CodexDesktop = 3, CodexCli = 4 };
-enum class Family : int { Claude = 1, Codex = 2 };
+// 5 and 6 are reserved for the Antigravity desktop app and command line.
+enum class Tool : int {
+    ClaudeDesktop = 1, ClaudeCli = 2, CodexDesktop = 3, CodexCli = 4,
+    AntigravityDesktop = 5, AntigravityCli = 6,
+    ClaudeWeb = 7, ChatGptWeb = 8, Gemini = 9
+};
+// Web: conversations synced from the services' websites rather than read from disk.
+enum class Family : int { Claude = 1, Codex = 2, Web = 3, Antigravity = 4 };
+
+bool IsWeb(Tool tool);
+bool IsCommandLine(Tool tool);
 
 wchar_t const* ToolName(Tool tool);
 Family FamilyOf(Tool tool);
@@ -52,6 +61,8 @@ struct SourceRoots {
     std::filesystem::path claudeDesktop;       // %APPDATA%/Claude/claude-code-sessions
     std::filesystem::path claudeConfig;        // ~/.claude.json
     std::filesystem::path codexHome;           // ~/.codex
+    std::filesystem::path antigravity;         // ~/.gemini/antigravity/conversations (desktop, encrypted)
+    std::filesystem::path antigravityCli;      // ~/.gemini/antigravity-cli/conversations (agy)
     static SourceRoots Detect();
     std::vector<std::filesystem::path> Watched() const;
 };
@@ -60,21 +71,42 @@ std::vector<SourceFile> FindSourceFiles(SourceRoots const& roots);
 
 ParsedSession ParseClaude(std::filesystem::path const& file);
 ParsedSession ParseCodex(std::filesystem::path const& file);
+ParsedSession ParseAntigravityDesktop(std::filesystem::path const& file);
+ParsedSession ParseAntigravityCli(std::filesystem::path const& file);
+// Antigravity desktop conversation titles, by conversation id.
+std::unordered_map<std::string, std::string> ReadAntigravityTitles();
 
 // Titles, accounts and archive state that the apps keep outside the transcripts.
 struct AppEntry {
     std::string title;
     std::string account;
     std::string appId;    // Claude desktop "local_..." id
+    std::string folder;   // the folder the app files the session under (Claude desktop: originCwd)
+    std::string project;  // the Codex project the thread belongs to, as named in its sidebar
     bool archived = false;
+};
+
+// A Codex project: its display name and the folders it covers.
+struct CodexProject {
+    std::string name;
+    std::wstring root;
 };
 
 struct AppMetadata {
     std::unordered_map<std::string, AppEntry> claude;  // by Claude session id
     std::unordered_map<std::string, AppEntry> codex;   // by Codex thread id
     std::string claudeCliAccount;                      // organization signed in to the command line
+    // The Claude desktop app opens only sessions of the organization it is
+    // showing. Best guess: the organization of the most recently focused session.
+    std::string claudeDesktopAccount;
     std::unordered_map<std::string, std::string> accountNames;  // suggested names for new accounts
+    std::vector<CodexProject> codexProjects;
+    std::unordered_map<std::string, std::string> antigravityTitles;
 };
+
+// The short folder name a card shows: a Codex project name when the folder
+// belongs to one, otherwise the last part of the path. Empty for scratch folders.
+std::string FolderLabel(std::string const& cwd, std::vector<CodexProject> const& projects);
 
 AppMetadata ReadAppMetadata(SourceRoots const& roots);
 

@@ -1,4 +1,5 @@
 #include "Indexer.h"
+#include "Embedder.h"
 #include "Index.h"
 #include "Sources.h"
 #include "Text.h"
@@ -28,7 +29,29 @@ std::wstring Plural(int n, wchar_t const* one, wchar_t const* many) {
     return std::to_wstring(n) + L" " + (n == 1 ? one : many);
 }
 
+std::wstring Grouped(int64_t n) {
+    auto text = std::to_wstring(n);
+    for (int i = int(text.size()) - 3; i > 0; i -= 3) text.insert(size_t(i), L",");
+    return text;
+}
+
+// "Up to date · 410 sessions · 20,520 messages", plus a warning when Antigravity
+// conversations could not be decrypted (they are never skipped silently).
+std::wstring UpToDate(Index& index) {
+    auto totals = index.Count();
+    std::wstring text = L"Up to date \u00B7 " + Grouped(totals.sessions) + (totals.sessions == 1 ? L" session" : L" sessions") +
+                        L" \u00B7 " + Grouped(totals.messages) + (totals.messages == 1 ? L" message" : L" messages");
+    if (int locked = index.CountSkipped("encrypted"))
+        text += L" \u00B7 " + Grouped(locked) + L" Antigravity conversation" + (locked == 1 ? L"" : L"s") +
+                L" can't be read (Antigravity may have changed its encryption)";
+    return text;
+}
+
 IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback const& callback, HANDLE stop) {
+    try {
+        index.CleanStoredChatGptText();
+    } catch (std::exception const&) {
+    }
     IndexStatus status;
     status.state = IndexStatus::State::Scanning;
     status.message = L"Scanning";
@@ -36,9 +59,14 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
 
     auto roots = SourceRoots::Detect();
     bool changed = false;
-    if (request.forgetAll || !request.forgetAccounts.empty()) {
+    // When the way transcripts are read changes, re-read everything. Meaning
+    // vectors are kept by content, so unchanged text is not embedded again.
+    constexpr char const* ParserVersion = "5";
+    const bool reparse = index.MetaValue("parser_version") != ParserVersion;
+    if (request.forgetAll || reparse || !request.forgetAccounts.empty()) {
         Transaction transaction(index.Database());
-        if (request.forgetAll) index.ForgetAll();
+        if (request.forgetAll || reparse) index.ForgetAll();
+        index.SetMetaValue("parser_version", ParserVersion);
         for (auto const& account : request.forgetAccounts) index.ForgetAccount(account);
         transaction.Commit();
         changed = true;
@@ -59,6 +87,7 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
         }
         Transaction transaction(index.Database());
         for (auto const& [path, _] : known) {
+            if (path.rfind(L"web:", 0) == 0) continue;  // synced from websites, not files
             if (!present.count(path)) {
                 index.Remove(path);
                 changed = true;
@@ -94,7 +123,11 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
                     if (i >= todo.size() || cancelled) break;
                     ParsedSession parsed;
                     try {
-                        parsed = todo[i].family == Family::Claude ? ParseClaude(todo[i].path) : ParseCodex(todo[i].path);
+                        auto const& file = todo[i];
+                        if (file.family == Family::Claude) parsed = ParseClaude(file.path);
+                        else if (file.family == Family::Codex) parsed = ParseCodex(file.path);
+                        else if (file.path.extension() == L".pb") parsed = ParseAntigravityDesktop(file.path);
+                        else parsed = ParseAntigravityCli(file.path);
                     } catch (...) {
                         parsed.skip = true;
                         parsed.skipReason = "error";
@@ -169,9 +202,141 @@ IndexStatus Scan(Index& index, ScanRequest const& request, Indexer::Callback con
     status.dataChanged = true;  // titles or accounts may have changed even with no new files
     (void)changed;
     status.done = status.total;
-    status.message = L"Up to date · " + Plural(totals.sessions, L"session", L"sessions");
+    status.message = UpToDate(index);
     callback(status);
     return status;
+}
+
+uint64_t HashTokens(std::vector<int32_t> const& ids) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (int32_t id : ids) {
+        for (int k = 0; k < 4; ++k) {
+            hash ^= uint8_t(uint32_t(id) >> (8 * k));
+            hash *= 1099511628211ULL;
+        }
+    }
+    return hash ? hash : 1;  // 0 marks "nothing to embed"
+}
+
+// Embeds each session's name and first prompt (new sessions, or renamed ones).
+void EmbedTitles(Index& index, Embedder& embedder, HANDLE stop) {
+    auto titles = index.TitlesToEmbed();
+    constexpr size_t batchSize = 32;
+    for (size_t start = 0; start < titles.size(); start += batchSize) {
+        if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;
+        std::vector<std::vector<int32_t>> batch;
+        std::vector<size_t> which;
+        for (size_t k = start; k < std::min(titles.size(), start + batchSize); ++k) {
+            std::vector<int32_t> ids;
+            for (auto const& token : embedder.Tokens().Encode(titles[k].text, ChunkTokens)) ids.push_back(token.id);
+            if (ids.empty()) continue;
+            batch.push_back(std::move(ids));
+            which.push_back(k);
+        }
+        if (batch.empty()) continue;
+        auto results = embedder.Embed(batch);
+        Transaction transaction(index.Database());
+        for (size_t k = 0; k < results.size() && k < which.size(); ++k)
+            index.StoreTitleVector(titles[which[k]].session, titles[which[k]].hash, results[k]);
+        index.BumpVectorsVersion();
+        transaction.Commit();
+    }
+}
+
+// Embeds messages that have no vectors yet, newest sessions first. Stops early
+// for shutdown or when a rescan is requested (the request is left signaled).
+void EmbedPending(Index& index, Indexer::Callback const& callback, HANDLE stop, HANDLE request) {
+    std::wstring problem;
+    auto embedder = Embedder::Shared(&problem);
+    if (!embedder) return;
+    {
+        Transaction transaction(index.Database());
+        index.UseEmbeddingModel(embedder->Name());
+        transaction.Commit();
+    }
+    EmbedTitles(index, *embedder, stop);
+    const int pending = index.PendingEmbeddingCount();
+    if (pending == 0) return;
+
+    IndexStatus status;
+    status.state = IndexStatus::State::Indexing;
+    status.total = pending;
+    auto lastReport = Clock::now() - std::chrono::seconds(1);
+    constexpr size_t maxChunksPerMessage = 24;
+    constexpr size_t batchSize = 32;
+    for (;;) {
+        if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;
+        if (WaitForSingleObject(request, 0) == WAIT_OBJECT_0) {
+            SetEvent(request);
+            return;
+        }
+        auto messages = index.MessagesToEmbed(256);
+        if (messages.empty()) break;
+
+        struct Piece {
+            int64_t message;
+            int chunk;
+            int32_t offset;
+            int64_t hash;
+        };
+        std::vector<Piece> pieces;
+        std::vector<std::vector<int32_t>> toEmbed;
+        std::vector<int64_t> toEmbedHash;
+        std::unordered_set<int64_t> queued;
+        for (auto const& message : messages) {
+            auto tokens = embedder->Tokens().Encode(message.text, ChunkTokens * maxChunksPerMessage);
+            if (tokens.empty()) {
+                pieces.push_back({message.id, 0, 0, 0});
+                continue;
+            }
+            for (size_t start = 0, chunk = 0; start < tokens.size(); start += ChunkTokens, ++chunk) {
+                std::vector<int32_t> ids;
+                for (size_t k = start; k < std::min(tokens.size(), start + ChunkTokens); ++k) ids.push_back(tokens[k].id);
+                int64_t hash = int64_t(HashTokens(ids));
+                pieces.push_back({message.id, int(chunk), int32_t(tokens[start].offset), hash});
+                if (queued.insert(hash).second && !index.HasEmbedding(hash)) {
+                    toEmbed.push_back(std::move(ids));
+                    toEmbedHash.push_back(hash);
+                }
+            }
+        }
+
+        // Similar lengths batch together with less padding.
+        std::vector<size_t> order(toEmbed.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return toEmbed[a].size() < toEmbed[b].size(); });
+        std::vector<std::pair<int64_t, std::vector<float>>> vectors;
+        for (size_t start = 0; start < order.size(); start += batchSize) {
+            if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) return;
+            std::vector<std::vector<int32_t>> batch;
+            for (size_t k = start; k < std::min(order.size(), start + batchSize); ++k) batch.push_back(toEmbed[order[k]]);
+            auto results = embedder->Embed(batch);
+            for (size_t k = 0; k < results.size(); ++k) vectors.emplace_back(toEmbedHash[order[start + k]], std::move(results[k]));
+        }
+
+        Transaction transaction(index.Database());
+        for (auto const& [hash, vector] : vectors) index.StoreEmbedding(hash, vector);
+        for (auto const& piece : pieces) index.StoreChunk(piece.message, piece.chunk, piece.offset, piece.hash);
+        index.BumpVectorsVersion();
+        transaction.Commit();
+
+        status.done = std::min(status.total, status.done + int(messages.size()));
+        if (Clock::now() - lastReport > std::chrono::milliseconds(250)) {
+            status.message = L"Learning meaning \u00B7 " + std::to_wstring(status.done) + L" of " + std::to_wstring(status.total) +
+                             L" messages";
+            callback(status);
+            lastReport = Clock::now();
+        }
+    }
+    {
+        Transaction transaction(index.Database());
+        index.PruneEmbeddings();
+        transaction.Commit();
+    }
+    auto totals = index.Count();
+    status.state = IndexStatus::State::Ready;
+    status.message = UpToDate(index);
+    callback(status);
 }
 
 }  // namespace
@@ -226,6 +391,7 @@ void Indexer::Run() {
             }
             try {
                 Scan(index, request, callback, stopEvent);
+                EmbedPending(index, callback, stopEvent, requestEvent);
             } catch (std::exception const& e) {
                 IndexStatus failed;
                 failed.state = IndexStatus::State::Failed;
@@ -233,14 +399,13 @@ void Indexer::Run() {
                 callback(failed);
             }
         };
-        scan();
-
         std::vector<HANDLE> changes;
         for (auto const& root : SourceRoots::Detect().Watched()) {
             HANDLE change = FindFirstChangeNotificationW(root.c_str(), TRUE,
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
             if (change != INVALID_HANDLE_VALUE) changes.push_back(change);
         }
+        scan();
         std::vector<HANDLE> handles{stopEvent, requestEvent};
         handles.insert(handles.end(), changes.begin(), changes.end());
 
@@ -278,11 +443,18 @@ void Indexer::Run() {
     }
 }
 
-IndexStatus Indexer::RunOnce(fs::path const& database, Callback const& callback) {
+IndexStatus Indexer::RunOnce(fs::path const& database, Callback const& callback, bool embed) {
     Index index(database);
     HANDLE never = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE noRequest = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     auto status = Scan(index, {}, callback, never);
+    if (embed) {
+        IndexStatus last = status;
+        EmbedPending(index, [&](IndexStatus const& s) { last = s; callback(s); }, never, noRequest);
+        status = last;
+    }
     CloseHandle(never);
+    CloseHandle(noRequest);
     return status;
 }
 

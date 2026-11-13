@@ -10,13 +10,18 @@
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformMinVersion>10.0.22000.0</WindowsTargetPlatformMinVersion>
     <AppxPackage>false</AppxPackage><WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <!-- Framework-dependent: the Windows App Runtime (installed in Windows) supplies WinUI and
+         Windows ML, so the install folder holds only Sessions.exe, the bootstrap DLL and the database. -->
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <CppWinRTOptimized>true</CppWinRTOptimized><CppWinRTRootNamespaceAutoMerge>true</CppWinRTRootNamespaceAutoMerge>
     <UseWinUI>true</UseWinUI><EnableMsixTooling>false</EnableMsixTooling>
     <!-- Packages and build output live outside the repository; build.ps1 points them at D: (C: is nearly full). -->
     <SessionsBuildRoot Condition="'$(SessionsBuildRoot)'==''">$(MSBuildThisFileDirectory)build\</SessionsBuildRoot>
     <SessionsPackages>$(SessionsBuildRoot)packages\</SessionsPackages>
+    <SessionsModels>$(SessionsBuildRoot)models\</SessionsModels>
+    <WinMLEnableDefaultOrtHeaderIncludePath>true</WinMLEnableDefaultOrtHeaderIncludePath>
+    <!-- Web sync hosts Edge WebView2 directly (Win32 COM), with its loader linked in statically. -->
+    <WebView2LoaderPreference>Static</WebView2LoaderPreference>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
@@ -33,6 +38,8 @@
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.WinUI.2.3.9\build\native\Microsoft.WindowsAppSDK.WinUI.props" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Runtime.2.5.1\build\native\Microsoft.WindowsAppSDK.Runtime.props" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.2.5.1\build\native\Microsoft.WindowsAppSDK.props" />
+    <Import Project="$(SessionsPackages)Microsoft.Windows.AI.MachineLearning.2.1.74\build\native\Microsoft.Windows.AI.MachineLearning.props" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.ML.2.1.94\build\native\Microsoft.WindowsAppSDK.ML.props" />
   </ImportGroup>
   <PropertyGroup><OutDir>$(SessionsBuildRoot)$(Configuration)\</OutDir><IntDir>$(SessionsBuildRoot)obj\$(Configuration)\</IntDir><TargetName>Sessions</TargetName></PropertyGroup>
   <ItemDefinitionGroup>
@@ -47,10 +54,11 @@
       <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
     </ClCompile>
     <ResourceCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- The model, its vocabulary, the app image and the tool logos are embedded in the executable. -->
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src;$(SessionsModels);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
-    <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation Condition="'$(Configuration)'=='Release'">false</GenerateDebugInformation><AdditionalDependencies>windowsapp.lib;dwmapi.lib;ole32.lib;runtimeobject.lib;shlwapi.lib;shell32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation Condition="'$(Configuration)'=='Release'">false</GenerateDebugInformation><AdditionalDependencies>windowsapp.lib;shcore.lib;bcrypt.lib;crypt32.lib;dwmapi.lib;ole32.lib;runtimeobject.lib;shlwapi.lib;shell32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>app.manifest</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -72,9 +80,11 @@
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.WinUI.2.3.9\build\native\Microsoft.WindowsAppSDK.WinUI.targets" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.Runtime.2.5.1\build\native\Microsoft.WindowsAppSDK.Runtime.targets" />
     <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.2.5.1\build\native\Microsoft.WindowsAppSDK.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.Windows.AI.MachineLearning.2.1.74\build\native\Microsoft.Windows.AI.MachineLearning.targets" />
+    <Import Project="$(SessionsPackages)Microsoft.WindowsAppSDK.ML.2.1.94\build\native\Microsoft.WindowsAppSDK.ML.targets" />
   </ImportGroup>
-  <Target Name="GenerateSessionsResources" AfterTargets="Build">
-    <Copy SourceFiles="$(ProjectDir)assets\Sessions.png" DestinationFiles="$(OutDir)Sessions.png" SkipUnchangedFiles="true" />
-    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)tools\GenerateResources.ps1&quot; -OutputDirectory &quot;$(OutDir).&quot; -IntermediateDirectory &quot;$(IntDir)pri&quot; -IndexName &quot;$(TargetName)&quot;" />
+  <!-- WinUI references WebView2, but Sessions never uses it: keep its files out of the install folder. -->
+  <Target Name="RemoveUnusedWebView2" AfterTargets="Build">
+    <Delete Files="$(OutDir)Microsoft.Web.WebView2.Core.dll;$(OutDir)Microsoft.Web.WebView2.Core.winmd" />
   </Target>
 </Project>

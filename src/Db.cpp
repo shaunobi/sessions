@@ -49,6 +49,11 @@ Statement& Statement::Bind(int index, std::string_view utf8) {
     return *this;
 }
 
+Statement& Statement::BindBlob(int index, void const* data, size_t size) {
+    if (sqlite3_bind_blob(statement, index, data, int(size), SQLITE_TRANSIENT) != SQLITE_OK) Fail(db, "bind");
+    return *this;
+}
+
 Statement& Statement::BindNull(int index) {
     if (sqlite3_bind_null(statement, index) != SQLITE_OK) Fail(db, "bind");
     return *this;

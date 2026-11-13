@@ -26,7 +26,7 @@ Not indexed: Cursor, ChatGPT web chats, Claude.ai web chats, Cowork.
 
 Format notes:
 - Almost all Codex sessions (3,379 of 3,486) are stored Zstandard-compressed (`.jsonl.zst`), so reading Codex needs a Zstandard decoder.
-- Antigravity desktop `.pb` files measure 8.00 bits per byte of entropy, have no header and are not block-aligned: they are encrypted, not plain protobuf. Antigravity's language server is a Go program that saves them through a `proto_saver.WithEncryptionKey` helper and uses AES-GCM (an authenticated encryption mode), so these are almost certainly AES-GCM-encrypted protobuf. Windows Credential Manager holds an entry named `gemini:antigravity`, which is the likely home of the key (unconfirmed; its value has not been read).
+- Antigravity desktop `.pb` files are AES-256-GCM-encrypted protobuf (solved 2026-11-10). Layout: 12-byte nonce, ciphertext, 16-byte authentication tag. The key is a fixed 32-byte ASCII constant built into Antigravity's language server (`language_server_windows_x64.exe`, function `language_server.setUpTrajectorySaver`, passed to `proto_saver.WithEncryptionKey`); it is the same on every install, not per user. All 11 conversations on this PC decrypt and authenticate; the plaintext is uncompressed protobuf starting with the conversation id, followed by the messages. The constant may change with Antigravity updates, so the app should report a decryption failure clearly rather than skip silently. How it was found: Ghidra 12.1.4 headless analysis, with function addresses recovered from the Go function table (`D:\Apps\Tools\ghidra_work`). The `gemini:antigravity` credential is only Antigravity's sign-in token and is not used.
 - Antigravity desktop titles and stats are readable without decryption: `%APPDATA%\Antigravity\User\globalStorage\state.vscdb`, key `antigravityUnifiedStateSync.trajectorySummaries`, holds a base64 protobuf with one entry per conversation (id, title such as "Explain Repository Functionality", step count, timestamps). All 11 desktop conversations are listed there. Each conversation's `brain\<id>\` folder also holds readable Markdown artifacts (plans, reviews).
 - The same `state.vscdb` also holds Antigravity's sign-in token, so the app reads only the summaries key and never copies that file elsewhere.
 - The command-line `.db` files are ordinary SQLite.
@@ -77,6 +77,19 @@ The hardest part: creating a real session in the destination that its app accept
 - **Into Codex:** write a new session file and register it in Codex's own SQLite index (`state_5.sqlite`, `session_index.jsonl`).
 - Across tools, the tool calls do not translate directly (different formats and ids). The likely approach is to copy what was said and turn tool activity into short text notes. To be tested on throwaway sessions.
 
+## Web chats (2026-11-10)
+
+- **Goal:** find every conversation Shaun has had with AI, not only the coding sessions on this PC. Only **Claude, ChatGPT and Gemini** are supported; other assistants are out of scope.
+- **Approach: sync through each site's own backend** (option 2 of three considered), accepting that it will break when the sites change and fixing it then. Rejected for now: periodic official exports (manual, always out of date) and a browser extension (no history before it is installed).
+- Sessions has its own embedded browser (Edge WebView2, loader linked statically). Shaun signs in once per site in it; Sessions never handles passwords. The sign-ins live in a `Browser` profile folder beside the executable.
+- While Sessions runs it syncs 20 seconds after launch and then every 30 minutes, reading only conversations that are new or changed, and removing ones the site no longer lists. Claude reads every organization of the signed-in account; ChatGPT reads the personal account, workspaces, archived chats and project chats; Gemini reads the account's chat history.
+- Web conversations are indexed like local sessions (words and meaning), shown with the service's logo and a globe badge, and open in the default browser.
+- Not yet: Claude and ChatGPT web search results beyond what is in the chats, Google AI Mode search history, phone-only content that the sites do not return.
+
+## Claude organizations (2026-11-10)
+
+- The Claude desktop app shows one organization at a time and opens only that organization's sessions. It keeps the choice in a `lastActiveOrg` cookie and offers no link or command to change it from outside; changing it means quitting Claude, rewriting the cookie and restarting, which stops any running Claude Code sessions. Sessions currently explains this and asks Shaun to switch in Claude. Proposed: a confirmed "Restart Claude in <organization>" button (awaiting Shaun's answer).
+
 ## Findings
 
 Machine: Intel Core i9-13900 (24 cores), 64 GB RAM, NVIDIA GeForce RTX 3070 (8 GB). C: has about 20 GB free; D: has about 1.5 TB free.
@@ -85,4 +98,34 @@ Sizes: Claude Code ~1 GB of transcripts (180 top-level sessions plus subagents);
 
 ## Open questions
 
-1. Antigravity desktop full text (decryption approved 2026-11-09). Ruled out so far: the `gemini:antigravity` credential is only Antigravity's sign-in token (JSON with access and refresh tokens), not a key; a scan of the language server for a built-in 16- or 32-byte key (4-byte aligned, protobuf-looking first block) found nothing. Next step: disassemble `proto_saver.DiskSaver.Save` and the caller that passes `WithEncryptionKey` to see where the key comes from, and whether the data is compressed before encryption. This needs a decompiler (for example Ghidra, free, needs Java), which is not installed. Until then, desktop Antigravity is indexed from titles, summaries and brain artifacts.
+(none; Antigravity desktop field map recorded below)
+
+## Antigravity desktop: conversation field map (2026-11-10)
+
+Mapped from all 11 decrypted conversations on this PC (1,512 steps). Field numbers are protobuf field numbers; the official schema is not public, so these are observed, not documented.
+
+Top-level message (one per `.pb` file):
+- `1` string: conversation id (matches the file name).
+- `2` repeated message: **steps**, in order.
+
+Each step:
+- `1` varint: **step type**. The step's payload sits in one field whose number depends on the type.
+- `4` varint: step status.
+- `5` message: step metadata. `5.1` is a standard Timestamp (`5.1.1` seconds since 1970, `5.1.2` nanoseconds): **use this for message times**; first and last step give created and last-activity dates.
+
+Step types to index:
+
+| Step type | Payload field | Meaning | Text to index |
+|---|---|---|---|
+| 14 | `19` | User message | `19.2` (the user's text) |
+| 15 | `20` | AI response | `20.1` (reply text; present when the AI wrote prose, 213 of 495). `20.8` is the same reply with `cci:` file links: prefer `20.1`. |
+| 23 | `30` | Conversation checkpoint summary | `30.4` / `30.5` (summary prose; useful for semantic search) |
+
+Fields to skip (tool activity, per the "only what you and the AI said" rule):
+- `20.3` model thinking, `20.7` tool calls, `20.6` bot id.
+- Step type 5 (`10`, file views), 8 (`14`, file contents), 21 (`28`, terminal commands and output), 90 (`103`), 81 to 85, 98, 100 and the rest: tool or system steps.
+- Step field `31`: error details on failed steps.
+
+Message count for a card = number of type 14 steps plus type 15 steps that have `20.1`.
+
+Titles still come from `state.vscdb` (`antigravityUnifiedStateSync.trajectorySummaries`), since the conversation file has no title field.
