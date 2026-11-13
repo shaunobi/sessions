@@ -67,6 +67,16 @@ std::wstring WebSync::Key(std::wstring const& base, Tool tool) const {
     return base + std::to_wstring(int(tool)) + (slot > 1 ? L"_" + std::to_wstring(slot) : L"");
 }
 
+bool WebSync::Due(Tool tool) {
+    // ChatGPT's allowance is small and shared with the person's own browsing: once an hour.
+    const int64_t interval = (tool == Tool::ChatGptWeb ? 60 : 30) * 60 * 1000LL;
+    try {
+        return NowMs() - std::atoll(index.MetaValue(Utf8(Key(L"web_checked_", tool))).c_str()) >= interval - 60 * 1000;
+    } catch (...) {
+        return true;
+    }
+}
+
 bool WebSync::Paused(Tool tool) {
     try {
         return std::atoll(index.MetaValue(Utf8(Key(L"web_pause_until_", tool))).c_str()) > NowMs();
@@ -228,7 +238,7 @@ void WebSync::Sync(std::optional<Tool> only) {
     listedUpdated.clear();
     queue.clear();
     for (auto const& s : Services)
-        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb) && (only || !Paused(s.tool))) {
+        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb) && (only || (!Paused(s.tool) && (forced || Due(s.tool))))) {
             queue.push_back(&s);
             live[s.tool] = L"Waiting its turn to sync";
         }
@@ -299,6 +309,7 @@ void WebSync::Finish(std::wstring const& result) {
         for (auto service : queue) more = more || service->tool == current->tool;
         if (!more) {
             live.erase(current->tool);
+            try { index.SetMetaValue(Utf8(Key(L"web_checked_", current->tool)), std::to_string(NowMs())); } catch (...) {}
             SaveOutcomes();
         }
     }

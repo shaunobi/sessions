@@ -35,7 +35,13 @@ public:
     // account. For ChatGPT and Gemini this also signs out of Google, which they
     // sign in through. `done` receives a sentence for the person.
     void SignOut(Tool tool, std::function<void(std::wstring)> done);
-    void SyncAll() { Sync(std::nullopt); }
+    // Checks every site that is due: not checked within its interval (kept across
+    // restarts) and not paused after a "slow down". `force` checks sites that are not due too.
+    void SyncAll(bool force = false) {
+        forced = force;
+        Sync(std::nullopt);
+        forced = false;
+    }
     // Syncs one site now (ahead of anything queued), or every site.
     void Sync(std::optional<Tool> only);
     // What is happening with this site right now ("Reading chats · 42 so far"), or empty.
@@ -64,6 +70,8 @@ private:
     int slot = 1;
     std::wstring Key(std::wstring const& base, Tool tool) const;  // meta key for this slot
     std::unique_ptr<WebBrowser> NewBrowser();
+    bool forced = false;
+    bool Due(Tool tool);     // long enough since this site was last checked
     bool Paused(Tool tool);  // the site asked Sessions to slow down; leave it alone until then
     std::unique_ptr<WebBrowser> worker, signIn;
     std::deque<Service const*> queue;

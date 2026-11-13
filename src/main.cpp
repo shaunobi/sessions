@@ -622,8 +622,8 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             },
             sessions::ExecutableFolder() / L"Browser2", 2);
         Named<HyperlinkButton>(shell, L"SyncWeb").Click([this](auto&&, auto&&) {
-            webSync->SyncAll();
-            if (SecondChatGptUsed()) webSync2->SyncAll();
+            webSync->SyncAll(true);
+            if (SecondChatGptUsed()) webSync2->SyncAll(true);
         });
         webTimer = window.DispatcherQueue().CreateTimer();
         webTimer.Interval(std::chrono::seconds(20));

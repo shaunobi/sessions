@@ -177,23 +177,27 @@ constexpr wchar_t ChatGpt[] = LR"JS(
       // Sessions has the rest: list only what changed since its newest chat (a day's margin).
       const partial = !sessionsHint.full && sessionsHint.since > 0;
       const since = (sessionsHint.since || 0) - 24 * 3600 * 1000;
-      const older = (list) => list.length && list.every((c) => new Date(toIso(c.update_time)).getTime() < since);
+      // The list is newest first: once one chat on a page is older than that, the rest are too.
+      const older = (list) => list.some((c) => new Date(toIso(c.update_time)).getTime() < since);
       if (cached && Date.now() - cached.at < 30 * 60 * 1000 && (partial || cached.full)) {
         items = cached.items; projectOf = cached.projectOf;
       } else {
       post({ type: 'status', text: 'ChatGPT · listing' });
-      for (const archived of [false, true]) {
+      // A quick check reads the newest page or two of the main list and nothing else; archived
+      // chats and projects are walked only in the daily full list. Every request counts against
+      // the same hourly allowance as the person's own use of ChatGPT.
+      for (const archived of (partial ? [false] : [false, true])) {
         for (let offset = 0; ; offset += 100) {
           const page = await getJson('/backend-api/conversations?offset=' + offset + '&limit=100&order=updated&is_archived=' + archived, { headers });
           const list = page.items || [];
           for (const c of list) items.push({ id: 'chatgpt:' + c.id, updated: toIso(c.update_time), created: toIso(c.create_time), title: c.title || '' });
           post({ type: 'status', text: partial ? 'ChatGPT · checking for new chats' : 'ChatGPT · listing all chats (once a day) · ' + items.length + ' so far' });
-          if (list.length < 100 || offset > 50000 || (partial && older(list))) break;
-          await sleep(300);
+          if (list.length < 100 || offset > 50000 || (partial && (older(list) || offset >= 400))) break;
+          await sleep(2000);
         }
       }
       // Conversations inside projects are listed per project.
-      try {
+      if (!partial) try {
         const sidebar = await getJson('/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0', { headers });
         for (const entry of sidebar.items || []) {
           const g = (entry.gizmo && entry.gizmo.gizmo) || entry.gizmo || {};
@@ -211,15 +215,16 @@ constexpr wchar_t ChatGpt[] = LR"JS(
               projectOf[c.id] = name;
             }
             post({ type: 'status', text: partial ? 'ChatGPT · checking for new chats' : 'ChatGPT · listing all chats (once a day) · ' + items.length + ' so far' });
-            if (!list.length || (partial && older(list))) break;
+            if (!list.length) break;
             cursor = page.cursor;
-            await sleep(300);
+            await sleep(2000);
           }
         }
       } catch (e) { if (e.signedOut || e.rateLimited) throw e; post({ type: 'error', text: 'ChatGPT projects: ' + e.message }); }
       try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf, full: !partial })); } catch (e) {}
       }
 
+)JS" LR"JS(
       { const seen = new Set(); items = items.reverse().filter((x) => !seen.has(x.id) && seen.add(x.id)).reverse(); }
       const ids = await askWhichToFetch({ type: 'list', account, accountName: acct.name, complete: !partial, items });
       let n = 0;
