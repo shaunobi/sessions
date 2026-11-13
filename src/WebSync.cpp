@@ -67,6 +67,14 @@ std::wstring WebSync::Key(std::wstring const& base, Tool tool) const {
     return base + std::to_wstring(int(tool)) + (slot > 1 ? L"_" + std::to_wstring(slot) : L"");
 }
 
+bool WebSync::Paused(Tool tool) {
+    try {
+        return std::atoll(index.MetaValue(Utf8(Key(L"web_pause_until_", tool))).c_str()) > NowMs();
+    } catch (...) {
+        return false;
+    }
+}
+
 std::unique_ptr<WebBrowser> WebSync::NewBrowser() {
     auto browser = std::make_unique<WebBrowser>();
     if (!profile.empty()) browser->UseProfile(profile);
@@ -220,7 +228,7 @@ void WebSync::Sync(std::optional<Tool> only) {
     listedUpdated.clear();
     queue.clear();
     for (auto const& s : Services)
-        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb)) {
+        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb) && (only || !Paused(s.tool))) {
             queue.push_back(&s);
             live[s.tool] = L"Waiting its turn to sync";
         }
@@ -372,6 +380,17 @@ void WebSync::OnMessage(std::wstring const& text) {
             live[current->tool] = L"Signed in \u00B7 " + detail;
         }
         report(text, false, false);
+    } else if (type == "rateLimited") {
+        // Leave the site alone for an hour (or longer if it asked), then try again.
+        double seconds = 0;
+        if (auto value = message.Get("seconds"); value && value->type == json::Value::Type::Number) seconds = value->number;
+        int64_t until = NowMs() + std::max<int64_t>(int64_t(seconds * 1000), 3600LL * 1000);
+        try { index.SetMetaValue(Utf8(Key(L"web_pause_until_", current->tool)), std::to_string(until)); } catch (...) {}
+        outcomes[current->tool].signedIn = true;
+        moreToRead = false;
+        Finish(L"");
+        live.erase(current->tool);
+        report(L"", changed, false);
     } else if (type == "signedOut") {
         auto detail = message.Str("detail");
         Finish(L"not signed in" + (detail.empty() ? std::wstring() : L" (" + Wide(detail) + L")"));

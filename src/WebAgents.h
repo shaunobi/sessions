@@ -49,18 +49,14 @@ async function getJson(url, init, patient) {
     clearTimeout(timer);
     // Too many requests: back off well before trying again. The site's limit is shared
     // with your own browser, so pressing on would also stop chats loading for you.
+    // Too many requests: stop and leave the site alone for a while. Its limit is shared
+    // with your own browser, so pressing on would also stop chats loading for you.
     if (r.status === 429) {
       const after = parseInt(r.headers.get('retry-after') || '', 10);
-      throttle = Math.min(throttle + 1, 6);
-      // Waits grow 1, 2, 4, 8 minutes, then stay at 15: an hourly quota needs time to refill.
-      const backoff = Math.min(60000 * Math.pow(2, attempt), 15 * 60000);
-      const wait = after > 0 && after < 3600 ? Math.max(after * 1000, 30000) : backoff;
-      // Say so every half minute while waiting, so Sessions knows the sync is alive.
-      for (let left = wait; left > 0; left -= 30000) {
-        post({ type: 'status', text: location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down; resuming in ' + Math.round(left / 1000) + ' seconds' });
-        await sleep(Math.min(left, 30000));
-      }
-      continue;
+      const e = new Error(location.hostname.replace(/^www\./, '') + ' asked Sessions to slow down');
+      e.rateLimited = true;
+      e.seconds = after > 0 ? after : 0;
+      throw e;
     }
     if (r.status === 401 || r.status === 403) {
       let detail = '';
@@ -105,7 +101,7 @@ constexpr wchar_t Claude[] = LR"JS(
           await sleep(200);
         }
       } catch (e) {
-        if (e.signedOut) throw e;
+        if (e.signedOut || e.rateLimited) throw e;
         post({ type: 'error', text: 'Claude ' + (org.name || org.uuid) + ': ' + e.message });
         continue;
       }
@@ -126,7 +122,7 @@ constexpr wchar_t Claude[] = LR"JS(
           post({ type: 'conversation', id: full, account, title: c.name || '', project: (c.project && c.project.name) || '',
                  created: toIso(c.created_at), updated: toIso(c.updated_at), messages });
         } catch (e) {
-          if (e.signedOut) throw e;
+          if (e.signedOut || e.rateLimited) throw e;
           post({ type: 'error', text: 'Claude conversation ' + id + ': ' + e.message });
         }
         if (++n % 10 === 0) post({ type: 'status', text: 'Claude · ' + (org.name || '') + ' · ' + n + ' of ' + ids.length });
@@ -135,7 +131,7 @@ constexpr wchar_t Claude[] = LR"JS(
     }
     post({ type: 'done' });
   } catch (e) {
-    post(e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'Claude: ' + e.message, fatal: true });
+    post(e.rateLimited ? { type: 'rateLimited', seconds: e.seconds || 0 } : e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'Claude: ' + e.message, fatal: true });
   }
 })();
 )JS";
@@ -157,7 +153,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
         // The personal account may have no id of its own; it is then read without the account header.
         if (!accounts.some((x) => x.id === id)) accounts.push({ id, name: a.name || (a.structure === 'personal' ? 'Personal' : '') });
       }
-    } catch (e) { if (e.signedOut) throw e; }
+    } catch (e) { if (e.signedOut || e.rateLimited) throw e; }
     if (!accounts.length) accounts.push({ id: '', name: '' });
 
     const textOf = (message) => {
@@ -220,7 +216,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
             await sleep(300);
           }
         }
-      } catch (e) { if (e.signedOut) throw e; post({ type: 'error', text: 'ChatGPT projects: ' + e.message }); }
+      } catch (e) { if (e.signedOut || e.rateLimited) throw e; post({ type: 'error', text: 'ChatGPT projects: ' + e.message }); }
       try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items, projectOf, full: !partial })); } catch (e) {}
       }
 
@@ -253,7 +249,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           post({ type: 'conversation', id: full, account, title: c.title || '', project: projectOf[id] || '',
                  created: toIso(c.create_time), updated: toIso(c.update_time), messages });
         } catch (e) {
-          if (e.signedOut) throw e;
+          if (e.signedOut || e.rateLimited) throw e;
           post({ type: 'error', text: 'ChatGPT conversation ' + id + ': ' + e.message });
         }
         if (++n % 10 === 0) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length });
@@ -268,7 +264,7 @@ constexpr wchar_t ChatGpt[] = LR"JS(
     }
     post({ type: 'done' });
   } catch (e) {
-    post(e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'ChatGPT: ' + e.message, fatal: true });
+    post(e.rateLimited ? { type: 'rateLimited', seconds: e.seconds || 0 } : e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'ChatGPT: ' + e.message, fatal: true });
   }
 })();
 )JS";
@@ -341,7 +337,7 @@ constexpr wchar_t Gemini[] = LR"JS(
         }
         post({ type: 'conversation', id: full, account, title: titles[id] || '', project: '', created, updated, messages });
       } catch (e) {
-        if (e.signedOut) throw e;
+        if (e.signedOut || e.rateLimited) throw e;
         post({ type: 'error', text: 'Gemini conversation ' + id + ': ' + e.message });
       }
       if (++n % 10 === 0) post({ type: 'status', text: 'Gemini · ' + n + ' of ' + ids.length });
@@ -349,7 +345,7 @@ constexpr wchar_t Gemini[] = LR"JS(
     }
     post({ type: 'done' });
   } catch (e) {
-    post(e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'Gemini: ' + e.message, fatal: true });
+    post(e.rateLimited ? { type: 'rateLimited', seconds: e.seconds || 0 } : e.signedOut ? { type: 'signedOut', detail: e.message } : { type: 'error', text: 'Gemini: ' + e.message, fatal: true });
   }
 })();
 )JS";

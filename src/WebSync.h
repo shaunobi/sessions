@@ -64,6 +64,7 @@ private:
     int slot = 1;
     std::wstring Key(std::wstring const& base, Tool tool) const;  // meta key for this slot
     std::unique_ptr<WebBrowser> NewBrowser();
+    bool Paused(Tool tool);  // the site asked Sessions to slow down; leave it alone until then
     std::unique_ptr<WebBrowser> worker, signIn;
     std::deque<Service const*> queue;
     Service const* current = nullptr;
