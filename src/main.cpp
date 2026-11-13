@@ -322,7 +322,7 @@ constexpr wchar_t ShellMarkup[] = LR"(
 std::wstring WebSummary(sessions::WebSync& sync, bool details = false) {
     std::wstring out;
     for (auto const& site : sync.Statuses()) {
-        std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : sessions::ToolName(site.tool);
+        std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : site.tool == Tool::ChatGptWeb ? L"ChatGPT" : L"Gemini";
         std::wstring chats = std::to_wstring(site.chats) + (site.chats == 1 ? L" chat" : L" chats") + L" in Sessions";
         std::wstring line;
         if (!site.checked) {
@@ -493,7 +493,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         });
         BuildCardMenu();
 
-        toolFilter.Items().Append(box_value(L"All tools"));
+        toolFilter.Items().Append(box_value(L"All sources"));
         for (auto tool : {Tool::ClaudeDesktop, Tool::ClaudeCli, Tool::CodexDesktop, Tool::CodexCli, Tool::AntigravityDesktop, Tool::AntigravityCli, Tool::ClaudeWeb, Tool::ChatGptWeb,
                           Tool::Gemini}) {
             toolChoices.push_back(tool);
@@ -1741,7 +1741,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
                 for (auto const& second : webSync2->Statuses()) rows.emplace_back(webSync2.get(), second);
         }
         for (auto const& [sync, site] : rows) {
-            std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : sessions::ToolName(site.tool);
+            std::wstring name = site.tool == Tool::ClaudeWeb ? L"Claude" : site.tool == Tool::ChatGptWeb ? L"ChatGPT" : L"Gemini";
             if (sync->Slot() > 1) name += L" \u00B7 second account";
             std::wstring now = sync->Live(site.tool);
             // Signed in if the check running now says so, otherwise per the last finished check.
