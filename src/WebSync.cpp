@@ -229,6 +229,7 @@ void WebSync::Sync(std::optional<Tool> only) {
         return;
     }
     running = true;
+    runForced = forced;  // asked for by the person: always the light check
     // Keep the PC from sleeping while a sync runs (a first ChatGPT read takes hours); released when it ends.
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
     changed = false;
@@ -238,7 +239,7 @@ void WebSync::Sync(std::optional<Tool> only) {
     listedUpdated.clear();
     queue.clear();
     for (auto const& s : Services)
-        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb) && (only || (!Paused(s.tool) && (forced || Due(s.tool))))) {
+        if ((!only || s.tool == *only) && (slot == 1 || s.tool == Tool::ChatGptWeb) && (only || forced || (!Paused(s.tool) && Due(s.tool)))) {
             queue.push_back(&s);
             live[s.tool] = L"Waiting its turn to sync";
         }
@@ -360,7 +361,7 @@ void WebSync::OnLoaded(bool succeeded, std::wstring const& url) {
             if (q.Step()) newest = q.Int(0);
         } catch (...) {
         }
-        const bool full = !newest || NowMs() - lastFull > 24LL * 3600 * 1000;
+        const bool full = !newest || (!runForced && NowMs() - lastFull > 24LL * 3600 * 1000);
         hint = std::wstring(L"{\"full\":") + (full ? L"true" : L"false") + L",\"since\":" + std::to_wstring(newest) + L"}";
     }
     worker->Run(std::wstring(L"(function(){\nconst sessionsHint = ") + hint + L";\n" + agents::Common + current->agent + L"\n})();");
