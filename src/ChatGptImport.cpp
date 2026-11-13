@@ -191,8 +191,10 @@ ImportResult ImportChatGptExport(fs::path const& database, fs::path const& sourc
             w.title = Squash(c.Str("title"));
             w.created = Ms(c.Get("create_time"));
             w.updated = Ms(c.Get("update_time"));
-            // Already read by sync at this version or later: keep that copy.
-            if (auto it = known.find(w.id); it != known.end() && it->second > 0 && it->second >= w.updated) continue;
+            // Already read by sync at this version or later: keep that copy, unless it has
+            // voice turns (copies read before transcripts were understood are missing them).
+            const bool voice = element.find("\"audio_transcription\"") != std::string_view::npos;
+            if (auto it = known.find(w.id); !voice && it != known.end() && it->second > 0 && it->second >= w.updated) continue;
             auto mapping = c.Get("mapping");
             std::vector<json::Value const*> chain;
             std::string node(c.Str("current_node"));
