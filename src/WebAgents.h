@@ -125,7 +125,7 @@ constexpr wchar_t Claude[] = LR"JS(
           if (e.signedOut || e.rateLimited) throw e;
           post({ type: 'error', text: 'Claude conversation ' + id + ': ' + e.message });
         }
-        if (++n % 10 === 0) post({ type: 'status', text: 'Claude · ' + (org.name || '') + ' · ' + n + ' of ' + ids.length });
+        post({ type: 'status', text: 'Claude · reading new or changed chats · ' + (++n) + ' of ' + ids.length });
         await sleep(200);
       }
     }
@@ -257,11 +257,11 @@ constexpr wchar_t ChatGpt[] = LR"JS(
           if (e.signedOut || e.rateLimited) throw e;
           post({ type: 'error', text: 'ChatGPT conversation ' + id + ': ' + e.message });
         }
-        if (++n % 10 === 0) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length });
+        post({ type: 'status', text: 'ChatGPT · reading new or changed chats · ' + (++n) + ' of ' + ids.length });
         // ChatGPT rate-limits conversation reads: one every 5 s normally, slower for a while
         // after it has asked Sessions to slow down (10, 20, 40 s ... up to 5 minutes).
         for (let gap = throttle ? Math.min(5000 * Math.pow(2, throttle), 300000) : 5000; gap > 0; gap -= 30000) {
-          if (gap > 30000) post({ type: 'status', text: 'ChatGPT · ' + n + ' of ' + ids.length + ' · going slowly; ChatGPT asked for fewer requests' });
+          if (gap > 30000) post({ type: 'status', text: 'ChatGPT · reading new or changed chats · ' + n + ' of ' + ids.length + ' · going slowly' });
           await sleep(Math.min(gap, 30000));
         }
         if (throttle && n % 20 === 0) throttle--;
@@ -345,7 +345,7 @@ constexpr wchar_t Gemini[] = LR"JS(
         if (e.signedOut || e.rateLimited) throw e;
         post({ type: 'error', text: 'Gemini conversation ' + id + ': ' + e.message });
       }
-      if (++n % 10 === 0) post({ type: 'status', text: 'Gemini · ' + n + ' of ' + ids.length });
+      post({ type: 'status', text: 'Gemini · reading new or changed chats · ' + (++n) + ' of ' + ids.length });
       await sleep(400);
     }
     post({ type: 'done' });

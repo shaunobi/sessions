@@ -388,7 +388,6 @@ void WebSync::OnMessage(std::wstring const& text) {
         std::wstring detail = dot == std::wstring::npos ? text : text.substr(dot + 3);
         if (outcomes[current->tool].signedIn && !detail.empty()) {
             if (detail == L"listing") detail = L"finding your chats";
-            else if (detail.find(L" of ") != std::wstring::npos) detail = L"reading chats, " + detail;
             live[current->tool] = L"Signed in \u00B7 " + detail;
         }
         report(text, false, false);
@@ -440,6 +439,11 @@ void WebSync::OnMessage(std::wstring const& text) {
         const int batch = current->tool == Tool::ChatGptWeb ? 120 : 200;
         int wanted = 0;
         auto known = index.KnownWeb(account);
+        // Chats an export already covers: the list's time for them can differ a little from
+        // the export's without anything having changed. Adopt the list's time, don't re-read.
+        int64_t exportUntil = 0;
+        if (current->tool == Tool::ChatGptWeb) try { exportUntil = std::atoll(index.MetaValue("chatgpt_export_until").c_str()); } catch (...) {}
+        std::vector<std::pair<std::string, int64_t>> adopt;
         std::vector<WebConversation> stubs;  // listed but never stored: shown by name now, read later
         std::vector<std::string> present;
         std::string ids = "{\"type\":\"fetch\",\"ids\":[";
@@ -466,6 +470,10 @@ void WebSync::OnMessage(std::wstring const& text) {
                     stubs.push_back(std::move(stub));
                 }
                 // Read conversations that are new or changed since the last sync.
+                if (it != known.end() && it->second > 0 && updated && it->second != updated && updated <= exportUntil) {
+                    adopt.emplace_back(id, updated);
+                    continue;
+                }
                 if (it == known.end() || (updated && it->second != updated)) {
                     if (++wanted > batch) {
                         moreToRead = true;
@@ -474,6 +482,15 @@ void WebSync::OnMessage(std::wstring const& text) {
                     ids += (first ? "" : ",") + JsonString(id);
                     first = false;
                 }
+            }
+        }
+        if (!adopt.empty()) {
+            try {
+                Transaction transaction(index.Database());
+                auto set = index.Database().Prepare("UPDATE sessions SET file_modified = ?1 WHERE path = ?2");
+                for (auto const& [id, time] : adopt) set.Bind(1, time).Bind(2, "web:" + id).Run();
+                transaction.Commit();
+            } catch (...) {
             }
         }
         if (!stubs.empty()) {

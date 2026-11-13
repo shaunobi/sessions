@@ -928,7 +928,15 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
             for (uint32_t i = 0; i < items.Size(); ++i)
                 if (auto container = cards.ContainerFromIndex(int32_t(i)).try_as<Primitives::SelectorItem>())
                     if (auto slot = container.ContentTemplateRoot().try_as<Border>())
-                        if (auto row = Row(shown[i])) slot.Child(CardFor(*row).as<UIElement>());
+                        if (auto row = Row(shown[i])) {
+                            // Leave a card alone when nothing it shows has changed (no flicker).
+                            auto current = slot.Child().try_as<FrameworkElement>();
+                            auto built = builtSignature.find(row->id);
+                            if (current && current.Tag() && unbox_value<int64_t>(current.Tag()) == row->id && built != builtSignature.end() &&
+                                built->second == CardSignature(*row))
+                                continue;
+                            slot.Child(CardFor(*row).as<UIElement>());
+                        }
         }
 
         std::wstring count;
@@ -948,17 +956,29 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
         }
     }
 
-    IInspectable CardFor(sessions::SessionRow const& row) {
-        std::wstring snippet;
+    std::wstring SnippetFor(sessions::SessionRow const& row) {
         if (!activeQuery.empty())
-            if (auto it = found.find(row.id); it != found.end())
-                snippet = (it->second.byMeaning ? L"\x03" : L"") + it->second.snippet;
+            if (auto it = found.find(row.id); it != found.end()) return (it->second.byMeaning ? L"\x03" : L"") + it->second.snippet;
+        return {};
+    }
+
+    // Everything a card shows, as one string: a card is rebuilt only when this changes.
+    std::unordered_map<int64_t, std::wstring> builtSignature;
+    std::wstring CardSignature(sessions::SessionRow const& row) {
+        std::wstring snippet = SnippetFor(row);
         std::wstring signature = row.title + L"\x1F" + row.folder + L"\x1F" + AccountName(row.account) + L"\x1F" + std::to_wstring(row.messages) + L"\x1F" +
                                  std::to_wstring(row.lastActivity) + L"\x1F" + std::to_wstring(int(row.tool)) + L"\x1F" + snippet +
                                  (row.archived ? L"\x1F" L"a" : L"");
         for (auto const& tag : row.tags) signature += L"\x1F#" + tag;
         if (sortBox && sortBox.SelectedIndex() == 2) signature += L"\x1F" L"created";  // cards show the start date
-        (void)signature;
+        signature += activeQuery.empty() ? L"\x1F" L"browse" : L"\x1F" L"search";  // card height differs
+        return signature;
+    }
+
+    IInspectable CardFor(sessions::SessionRow const& row) {
+        std::wstring snippet = SnippetFor(row);
+        if (builtSignature.size() > 20000) builtSignature.clear();
+        builtSignature[row.id] = CardSignature(row);
         Border card;
         card.Tag(box_value(row.id));
         card.CornerRadius({8, 8, 8, 8});

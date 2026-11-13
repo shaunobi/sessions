@@ -161,6 +161,7 @@ ImportResult ImportChatGptExport(fs::path const& database, fs::path const& sourc
         while (q.Step()) known.erase(std::string(q.Text(0)));
     }
 
+    int64_t newest = 0;  // the latest change the export knows about
     for (auto const& file : files) {
         std::string text = ReadAll(file);
         auto elements = Elements(text);
@@ -191,6 +192,7 @@ ImportResult ImportChatGptExport(fs::path const& database, fs::path const& sourc
             w.title = Squash(c.Str("title"));
             w.created = Ms(c.Get("create_time"));
             w.updated = Ms(c.Get("update_time"));
+            newest = std::max(newest, w.updated);
             // Already read by sync at this version or later: keep that copy, unless it has
             // voice turns (copies read before transcripts were understood are missing them).
             const bool voice = element.find("\"audio_transcription\"") != std::string_view::npos;
@@ -224,6 +226,12 @@ ImportResult ImportChatGptExport(fs::path const& database, fs::path const& sourc
             ++result.conversations;
         }
         transaction->Commit();
+    }
+    // The site's list reports slightly different times for some chats than the export does.
+    // Sync treats any chat last changed before this moment as covered by the export.
+    try {
+        if (newest > std::atoll(index.MetaValue("chatgpt_export_until").c_str())) index.SetMetaValue("chatgpt_export_until", std::to_string(newest));
+    } catch (...) {
     }
     if (!temporary.empty()) fs::remove_all(temporary, error);
     if (!result.conversations && !result.skipped) result.problem = L"Every chat in the export was already in Sessions.";
